@@ -629,6 +629,10 @@ def main():
     tp._sb("POST", "feeds?on_conflict=feed_id", feeds_rows, prefer="resolution=merge-duplicates,return=minimal")
     tp._sb("POST", "rpc/refresh_brand_index", {})
     tp._sb("POST", "rpc/refresh_site_stats", {})        # compteurs des pages (rayons, comparés, bons plans)
+    try:   # chiffres du tableau de bord /stats (lecture instantanée ; ~30 s de calcul, une fois par nuit)
+        tp._sb("POST", "rpc/refresh_dashboard_cache", {})
+    except RuntimeError as e:
+        print(f"  (tableau de bord : {str(e)[:120]})")
     try:   # index de recherche : liste d'attente vidée en fin de relevé (recherche rapide ensuite)
         tp._sb("POST", "rpc/clean_search_index", {})
     except RuntimeError as e:
