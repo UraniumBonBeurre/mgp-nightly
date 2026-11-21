@@ -241,6 +241,24 @@ def price_trend(price: float, history: list) -> dict:
     return out
 
 
+def title_score(title: str | None, brand: str | None) -> int:
+    """Qualité d'un titre d'offre : certaines boutiques omettent le type de produit en tête (Darty : « sans fil
+    Dreame Roboticmower… » pour « Tondeuse robot sans fil… ») ; un titre commençant par une majuscule, de
+    longueur raisonnable et citant la marque est préféré."""
+    t = (title or "").strip()
+    return (2 if t[:1].isupper() or t[:1].isdigit() else 0) + (1 if 15 <= len(t) <= 150 else 0) \
+        + (1 if brand and brand.lower() in t.lower() else 0)
+
+
+def tidy_title(title: str) -> str:
+    """Titre réduit à des références en minuscules (« rh8p12bs », « iks 41ve01 ») → majuscules."""
+    toks = title.split()
+    if (0 < len(toks) <= 3 and all(re.fullmatch(r"[a-z0-9-]+", t) for t in toks)
+            and any(re.search(r"\d", t) and re.search(r"[a-z]", t) for t in toks)):
+        return " ".join(t if t in _COLOURS else t.upper() for t in toks)
+    return title
+
+
 def build_product(key: str, offers: list[dict], today: str) -> dict | None:
     """Agrège les offres actives d'un produit : fiche (R2) et ligne d'index (Supabase)."""
     active = [o for o in offers if o["s"] and not o["x"]]
@@ -256,11 +274,13 @@ def build_product(key: str, offers: list[dict], today: str) -> dict | None:
         new = [o for o in new if o["p"] <= cap]
         active = [o for o in active if o["c"] != "new" or o["p"] <= cap]
     best = new[0]
+    # Titre : le plus complet des offres neuves (à égalité, celui de la moins chère)
+    title = tidy_title(max(new, key=lambda o: (title_score(o["t"], o["b"]), -o["p"]))["t"] or best["t"] or "")
     fresh = best["f"] is None or best["f"] >= (datetime.fromisoformat(today) - timedelta(days=STALE_DAYS)).date().isoformat()
     refurb = [o["p"] for o in active if o["c"] == "refurbished"]
     disc = round(100 * (1 - best["p"] / best["o"])) if best["o"] and best["o"] > best["p"] else None
     row = {
-        "ean": key, "title": best["t"], "brand": best["b"], "category": best["cat"], "image_url": best["i"],
+        "ean": key, "title": title, "brand": best["b"], "category": best["cat"], "image_url": best["i"],
         "offers_count": len(new), "merchants_count": len({o["m"] for o in new}),
         "min_price": best["p"], "max_price": max(o["p"] for o in new), "old_price": best["o"] if disc else None,
         "refurbished_min_price": min(refurb) if refurb else None, "best_merchant": best["n"],
@@ -268,7 +288,7 @@ def build_product(key: str, offers: list[dict], today: str) -> dict | None:
         **price_trend(best["p"], best.get("h")),
     }
     doc = {
-        "k": key, "t": best["t"], "b": best["b"], "i": best["i"], "cat": best["cat"],
+        "k": key, "t": title, "b": best["b"], "i": best["i"], "cat": best["cat"],
         "d": next((o["d"] for o in sorted(active, key=lambda o: o["p"]) if o.get("d")), None),
         "o": [{"id": f"{o['m']}-{o['c'][0]}", "m": o["m"], "n": o["n"], "a": o["a"], "p": o["p"], "op": o["o"],
                "c": o["c"], "u": o["u"], "f": o["f"], "h": o["h"]} for o in sorted(active, key=lambda o: o["p"])],
