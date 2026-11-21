@@ -382,6 +382,54 @@ def r2_put_json(key: str, data, cache_seconds: int = 3600):
 
 # ── Programme ───────────────────────────────────────────────────────────────
 
+SITE = "https://mygoodpick.net"
+SITEMAP_VIEWS = ("fr", "uk", "us", "de", "it", "es")     # vues indexables (src/lib/markets.ts, SITES ; « en » exclu)
+SITEMAP_PREFIX = "sitemaps"
+
+
+def _xml(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def write_sitemaps() -> dict[str, int]:
+    """Sitemap écrit dans R2 en fin de relevé et servi par le Worker (/sitemap.xml = index, /sitemaps/{vue}.xml).
+    Généré à la demande par Netlify, il dépassait le délai de 30 s (504 le 21/11) dès que la copie en cache
+    expirait, et chaque essai coûtait des crédits. Mêmes pages que src/app/sitemap.ts (repli si R2 est vide) :
+    accueil, bons plans, liste des fiches, baisses, codes promo, rayons ayant des fiches comparées, fiches
+    comparant au moins deux enseignes (moins de 50 000 adresses par fichier)."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    counts = {}
+    for view in SITEMAP_VIEWS:
+        base = f"{SITE}/{view}"
+        urls = [(base, now, "1.0"), (f"{base}/bons-plans", now, "0.9"), (f"{base}/prix", now, "0.6"),
+                (f"{base}/baisses-de-prix", now, "0.9"), (f"{base}/codes-promo", now, "0.8")]
+        for r in tp._sb("POST", "rpc/rayon_counts", {"p_market": view}) or []:
+            if (r.get("compared") or 0) > 0 and r["slug"] != "autres":
+                urls.append((f"{base}/rayon/{r['slug']}", now, "0.8"))
+        last = ""
+        while True:
+            rows = tp._sb("GET", f"products_ean?select=ean,slug,updated_at&market=eq.{view}&merchants_count=gte.2"
+                                 f"&ean=gt.{last}&order=ean&limit=1000") or []
+            urls += [(f"{base}/prix/{(r['slug'] + '-') if r['slug'] else ''}{r['ean']}",
+                      (r["updated_at"] or now)[:19] + "Z" if "T" in (r["updated_at"] or "") else now, "0.7") for r in rows]
+            if len(rows) < 1000:
+                break
+            last = rows[-1]["ean"]
+        urls = urls[:50_000]
+        body = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+                + "".join(f"<url><loc>{_xml(u)}</loc><lastmod>{m}</lastmod><changefreq>daily</changefreq><priority>{p}</priority></url>\n"
+                          for u, m, p in urls) + "</urlset>\n")
+        s3.put_object(Bucket=R2_BUCKET_NAME, Key=f"{SITEMAP_PREFIX}/{view}.xml", Body=body.encode(),
+                      ContentType="application/xml; charset=utf-8", CacheControl="public, max-age=3600")
+        counts[view] = len(urls)
+    index = ('<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+             + "".join(f"<sitemap><loc>{SITE}/{SITEMAP_PREFIX}/{v}.xml</loc><lastmod>{now}</lastmod></sitemap>\n" for v in SITEMAP_VIEWS)
+             + "</sitemapindex>\n")
+    s3.put_object(Bucket=R2_BUCKET_NAME, Key=f"{SITEMAP_PREFIX}/index.xml", Body=index.encode(),
+                  ContentType="application/xml; charset=utf-8", CacheControl="public, max-age=3600")
+    return counts
+
+
 def bootstrap_history() -> dict[tuple[int, str], list]:
     """1re exécution : historique repris de la table price_points, (feed_id, aw_id) → [[date, prix]]."""
     offers, last = {}, 0
@@ -417,7 +465,11 @@ def main():
     ap.add_argument("--reindex", action="store_true", help="renvoie tout l'index Supabase (sans réécrire les fragments)")
     ap.add_argument("--all-shards", action="store_true", help="réécrit tous les fragments R2 (index inchangé)")
     ap.add_argument("--full", action="store_true", help="réécrit tous les fragments et tout l'index (après un changement de règle)")
+    ap.add_argument("--sitemaps-only", action="store_true", help="réécrit seulement le sitemap (R2), sans relevé")
     args = ap.parse_args()
+    if args.sitemaps_only:
+        print(f"Sitemap (R2) : {write_sitemaps()}")
+        return
     today = datetime.now(timezone.utc).date().isoformat()
     run_start = datetime.now(timezone.utc).isoformat()
     history = bootstrap_history() if args.bootstrap else {}
@@ -659,6 +711,10 @@ def main():
         print(f"  (nettoyage de l'index de recherche : {str(e)[:120]})")
     print(f"Supabase : {len(rows)} produits écrits, {len(gone)} remis à zéro")
     tp.notify_indexnow(run_start)
+    try:   # sitemap servi par le Worker (après l'index : il reprend les fiches du jour)
+        print(f"Sitemap (R2) : {write_sitemaps()}")
+    except Exception as e:  # noqa: BLE001 — le sitemap de la veille reste en place
+        print(f"  ⚠ sitemap non écrit : {str(e)[:150]}")
     sys.exit(0 if ok else 1)
 
 
