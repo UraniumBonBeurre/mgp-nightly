@@ -69,16 +69,16 @@ PERIMETER = (
 # ── Tous les autres partenaires (docs/PLAN-REORIENTATION.md §0.4 quater) ────
 # Construits chaque nuit depuis la liste des flux Awin des programmes rejoints.
 CORE_ADVERTISERS = {12665, 7735, 6901}       # Fnac, Darty, Rue du Commerce : flux ci-dessus seulement
-SKIP_ADVERTISERS = {13075,                   # El Corte Inglés (ES) : pas de marché espagnol
-                    127361}                  # Aussui : recharges de jeux (V-Bucks…), sans code-barres, en euros et en
-                                             # anglais (aurait rempli le marché français de codes numériques), 21/11
+# Aussui (127361) : recharges de jeux (V-Bucks…), sans code-barres, en euros et en anglais (aurait rempli le marché
+# français de codes numériques), 21/11. El Corte Inglés (13075), ignoré faute de marché espagnol, repris le 21/11.
+SKIP_ADVERTISERS = {127361}
 ONLY_FEEDS = {26009: {110451}}               # AliExpress : flux « Bestsellers » seulement
 SKIP_FEED_NAME = re.compile(r"test|livre|libro|book|\bold\b|occasion", re.IGNORECASE)
 # Un marché = une devise + une langue. En euros, la langue du flux départage France et Allemagne.
-MARKET_LANG = {"fr": "fr", "de": "de", "uk": "en", "us": "en"}
-EUR_LANG_MARKET = {"fr": "fr", "de": "de", "en": "fr"}   # flux anglais en euros : marché français (repli)
+MARKET_LANG = {"fr": "fr", "de": "de", "uk": "en", "us": "en", "it": "it", "es": "es"}
+EUR_LANG_MARKET = {"fr": "fr", "de": "de", "it": "it", "es": "es", "en": "fr"}   # flux anglais en euros : marché français (repli)
 # Plafonds par flux (limite 500 Mo de Supabase). Marché américain prioritaire (demande de l'utilisateur).
-PARTNER_CAP = {"us": 5000, "uk": 5000, "fr": 3000, "de": 3000}   # + tous les produits comparables (OVERLAP_CAP)
+PARTNER_CAP = {"us": 5000, "uk": 5000, "fr": 3000, "de": 3000, "it": 5000, "es": 5000}   # + tous les produits comparables (OVERLAP_CAP)
 ALIEXPRESS_CAP = 3000
 MAX_FEED_AGE_DAYS = 60                       # flux que la boutique n'a pas mis à jour depuis 60 jours : ignoré (revient
                                              # seul s'il est rafraîchi). 21/11 : 160 flux figés depuis mai = 85 749
@@ -91,7 +91,7 @@ FEED_COLUMNS = (
 )
 SITE = "https://mygoodpick.net"
 INDEXNOW_KEY = "e2f569046b3da5ad02dbfbd17528d111"  # public : servi à {SITE}/{clé}.txt
-INDEXNOW_MARKETS = ("fr", "uk", "de", "us")    # marchés indexés (src/lib/markets.ts, SITES indexable)
+INDEXNOW_MARKETS = ("fr", "uk", "de", "us", "it", "es")    # marchés indexés (src/lib/markets.ts, SITES indexable)
 BATCH = 500
 REMOVAL_GUARD = 0.5  # flux < 50 % des offres actives → suspect, pas de retrait
 MAX_OLD_PRICE_RATIO = 4  # prix barré > 4 × prix : erreur de flux (ex. 100 000 € → 49,99 €)
@@ -479,7 +479,8 @@ def resolve_partner(feed: Feed) -> Feed | None:
 
 
 def partner_market(currency: str | None, language: str) -> str | None:
-    """Dollar → us, livre → uk ; en euros, la langue : français (ou anglais) → fr, allemand → de."""
+    """Dollar → us, livre → uk ; en euros, la langue : français (ou anglais) → fr, allemand → de, italien → it,
+    espagnol → es (marchés ouverts le 21/11)."""
     if currency == "USD":
         return "us"
     if currency == "GBP":
