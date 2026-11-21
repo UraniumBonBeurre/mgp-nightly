@@ -55,6 +55,73 @@ def classify_batch(cats: list[dict], rayons: list[dict]) -> dict[str, str]:
     return out
 
 
+def classify_sous_batch(cats: list[dict], labels: dict[str, str]) -> dict[str, str]:
+    """Catégories → « rayon/sous-rayon » (ou « autres »). Peut corriger le rayon (rollers rangés en mode, 21/11)."""
+    out = {c["category"]: "autres" for c in cats if not descriptive(c["category"])}    # « 8 », « 1611 » : codes propres à une boutique
+    cats = [c for c in cats if descriptive(c["category"])]
+    if not cats:
+        return out
+    lines = "\n".join(f"{i}\t{c['category'][:160]}\t{' | '.join(c['examples'] or [])}" for i, c in enumerate(cats))
+    opts = "\n".join(f"- {code}: {label}" for code, label in labels.items())
+    got = ask_gemini(
+        "Each line is a product category used by an online store (id<TAB>category<TAB>example products).\n"
+        "Choose the ONE department/sub-department where ALL products of this category belong. Decide from the"
+        " category name; examples only clarify its meaning (e.g. roller skates and ski helmets are sport, not"
+        " fashion; a laptop sleeve is a computer accessory). When the department is clear, choose its closest"
+        " sub-department (e.g. 'Men's Outerwear' → mode/vetements-homme, 'General Clothing' or 'T-Shirts' →"
+        " mode/vetements). Answer 'autres' only when the category is not descriptive (a brand, 'sale', 'new'),"
+        " groups several departments (e.g. 'Apparel & Accessories', 'Gifts', 'Home & Garden'), or nothing fits.\n"
+        f"Options:\n{opts}\nCategories:\n{lines}",
+        list(labels) + ["autres"], MODELS)
+    out.update({c["category"]: got.get(i, "autres") for i, c in enumerate(cats)})
+    return out
+
+
+def classify_sous(dry: bool) -> Counter:
+    """Sous-rayon des catégories qui n'en ont pas encore (une fois par catégorie), puis application par lots."""
+    from sous_rayons import TAXONOMY
+    rayon_en = {r["slug"]: r["label_en"] for r in sb("GET", "rayons?select=slug,label_en")}
+    labels = {f"{r}/{s[0]}": f"{rayon_en.get(r, r)} > {s[2]}" for r, subs in TAXONOMY.items() for s in subs}
+    total, seen, t0 = Counter(), set(), time.monotonic()
+    while True:
+        todo = [c for c in sb("POST", "rpc/unsub_categories", {"p_limit": 1000}) or [] if c["category"] not in seen]
+        if not todo:
+            break
+        seen |= {c["category"] for c in todo}
+        batches = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
+
+        def run(batch):
+            try:
+                return classify_sous_batch(batch, labels)
+            except RuntimeError as e:          # lot sauté : repris au prochain passage
+                print(f"  lot ignoré : {e}")
+                return {}
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for batch, mapping in zip(batches, pool.map(run, batches)):
+                total.update(v.split("/")[0] for v in mapping.values())
+                if mapping and not dry:
+                    old = {c["category"]: c["rayon"] for c in batch}
+                    sb("POST", "category_rayons?on_conflict=category", [
+                        {"category": c, "rayon": v.split("/")[0], "sous_rayon": v.split("/")[1]} if v != "autres"
+                        else {"category": c, "rayon": old[c], "sous_rayon": ""} for c, v in mapping.items()])
+        print(f"  {len(seen)} catégories : sous-rayon décidé ({time.monotonic() - t0:.0f} s)")
+        if dry:
+            break
+    return total
+
+
+def apply_sous(max_rows: int = 20_000) -> int:
+    """Produits mis à jour par lots de 2 000 espacés, au plus max_rows par appel (gonflement de la base)."""
+    moved = 0
+    while moved < max_rows:
+        n = sb("POST", "rpc/apply_category_sous_rayons", {"p_limit": 2000}) or 0
+        moved += n
+        if n < 2000:
+            break
+        time.sleep(1)
+    return moved
+
+
 def main():
     dry = "--dry-run" in sys.argv
     if not GOOGLE_AI_API_KEY:
@@ -92,7 +159,13 @@ def main():
             if n < 10000:
                 break
         print(f"Produits changés de rayon : {moved}")
+    if not dry:
+        sous = classify_sous(dry)
+        if sous:
+            print(f"Sous-rayons : {sum(sous.values())} catégories ({dict(sous.most_common(5))}…)")
+        print(f"Produits classés en sous-rayon : {apply_sous()}")
         sb("POST", "rpc/refresh_site_stats", {})
+        sb("POST", "rpc/refresh_sous_rayon_stats", {})
 
 
 if __name__ == "__main__":

@@ -38,10 +38,11 @@ API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateConten
 
 
 def sb(method: str, path: str, body=None):
+    prefer = "return=minimal" + (",resolution=merge-duplicates" if "on_conflict=" in path else "")   # upsert
     req = urllib.request.Request(f"{SUPABASE_URL}/rest/v1/{path}", method=method,
                                  data=json.dumps(body).encode() if body is not None else None,
                                  headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-                                          "Content-Type": "application/json", "Prefer": "return=minimal"})
+                                          "Content-Type": "application/json", "Prefer": prefer})
     with urllib.request.urlopen(req, timeout=120) as r:
         raw = r.read()
         return json.loads(raw) if raw else None
