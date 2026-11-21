@@ -53,9 +53,27 @@ def main():
     if not GOOGLE_AI_API_KEY:
         sys.exit("GOOGLE_AI_API_KEY requis")
     opts = options()
-    todo = (sb("POST", "rpc/title_candidates", {"p_limit": args.max, "p_recheck": args.recheck}) or [])[: args.max]
+    total_seen, done, none, moved = 0, 0, 0, 0
+    t0 = time.monotonic()
+    while total_seen < args.max:
+        # L'API renvoie au plus 1 000 lignes : on reprend tant qu'il en reste (un produit traité n'est plus candidat)
+        todo = (sb("POST", "rpc/title_candidates", {"p_limit": min(1000, args.max - total_seen), "p_recheck": args.recheck}) or [])
+        if not todo:
+            break
+        total_seen += len(todo)
+        d, k, m = process(todo, opts, args)
+        done, none, moved = done + d, none + k, moved + m
+        print(f"  {total_seen} produits : {done} classés ({moved} changés de rayon), {none} indécis ({time.monotonic() - t0:.0f} s)")
+        if d + k == 0:                     # lots tous ignorés (Gemini indisponible) : on arrête
+            break
+    print(f"Classés par leur titre : {done} ({moved} changés de rayon) ; indécis : {none} ; {time.monotonic() - t0:.0f} s")
+    if total_seen:
+        sb("POST", "rpc/refresh_site_stats", {})
+        sb("POST", "rpc/refresh_sous_rayon_stats", {})
+
+
+def process(todo: list[dict], opts: dict[str, str], args) -> tuple[int, int, int]:
     jobs = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
-    print(f"{len(todo)} produits à classer d'après leur titre ({len(jobs)} lots)")
 
     def run(batch: list[dict]) -> tuple[int, int, int]:
         try:
@@ -80,16 +98,10 @@ def main():
         return len(batch) - none, none, moved
 
     done = none = moved = 0
-    t0 = time.monotonic()
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        for n, (d, k, m) in enumerate(pool.map(run, jobs), 1):
+        for d, k, m in pool.map(run, jobs):
             done, none, moved = done + d, none + k, moved + m
-            if n % 10 == 0:
-                print(f"  {n}/{len(jobs)} lots : {done} classés ({moved} changés de rayon), {none} indécis ({time.monotonic() - t0:.0f} s)")
-    print(f"Classés par leur titre : {done} ({moved} changés de rayon) ; indécis : {none} ; {time.monotonic() - t0:.0f} s")
-    if todo:
-        sb("POST", "rpc/refresh_site_stats", {})
-        sb("POST", "rpc/refresh_sous_rayon_stats", {})
+    return done, none, moved
 
 
 if __name__ == "__main__":
