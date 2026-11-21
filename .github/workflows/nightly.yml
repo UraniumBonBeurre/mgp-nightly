@@ -78,6 +78,13 @@ jobs:
         env:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
 
+      # Sous-rayon d'après le titre (produits sans catégorie de boutique utilisable), après classify_categories
+      - name: Classify sub-departments by title (Gemini Flash Lite)
+        if: ${{ always() && !inputs.check }}
+        run: python3 scripts/classify_sous_titles.py --max 20000 > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
+        env:
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+
       - name: Sync Awin sales and clicks
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/awin_sync.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }

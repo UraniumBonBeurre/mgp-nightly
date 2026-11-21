@@ -406,6 +406,9 @@ def write_sitemaps() -> dict[str, int]:
         for r in tp._sb("POST", "rpc/rayon_counts", {"p_market": view}) or []:
             if (r.get("compared") or 0) > 0 and r["slug"] != "autres":
                 urls.append((f"{base}/rayon/{r['slug']}", now, "0.8"))
+        # Sous-rayons d'au moins 12 produits (pages /rayon/{rayon}/{sous-rayon}, 21/11)
+        for r in tp._sb("GET", f"sous_rayon_stats?select=rayon,sous_rayon&market=eq.{view}&products=gte.12") or []:
+            urls.append((f"{base}/rayon/{r['rayon']}/{r['sous_rayon']}", now, "0.7"))
         last = ""
         while True:
             rows = tp._sb("GET", f"products_ean?select=ean,slug,updated_at&market=eq.{view}&merchants_count=gte.2"
