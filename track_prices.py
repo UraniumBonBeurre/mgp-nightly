@@ -69,7 +69,9 @@ PERIMETER = (
 # ── Tous les autres partenaires (docs/PLAN-REORIENTATION.md §0.4 quater) ────
 # Construits chaque nuit depuis la liste des flux Awin des programmes rejoints.
 CORE_ADVERTISERS = {12665, 7735, 6901}       # Fnac, Darty, Rue du Commerce : flux ci-dessus seulement
-SKIP_ADVERTISERS = {13075}                   # El Corte Inglés (ES) : pas de marché espagnol
+SKIP_ADVERTISERS = {13075,                   # El Corte Inglés (ES) : pas de marché espagnol
+                    127361}                  # Aussui : recharges de jeux (V-Bucks…), sans code-barres, en euros et en
+                                             # anglais (aurait rempli le marché français de codes numériques), 21/11
 ONLY_FEEDS = {26009: {110451}}               # AliExpress : flux « Bestsellers » seulement
 SKIP_FEED_NAME = re.compile(r"test|livre|libro|book|\bold\b|occasion", re.IGNORECASE)
 # Un marché = une devise + une langue. En euros, la langue du flux départage France et Allemagne.
@@ -78,7 +80,9 @@ EUR_LANG_MARKET = {"fr": "fr", "de": "de", "en": "fr"}   # flux anglais en euros
 # Plafonds par flux (limite 500 Mo de Supabase). Marché américain prioritaire (demande de l'utilisateur).
 PARTNER_CAP = {"us": 5000, "uk": 5000, "fr": 3000, "de": 3000}   # + tous les produits comparables (OVERLAP_CAP)
 ALIEXPRESS_CAP = 3000
-MAX_FEED_AGE_DAYS = 400                      # flux non importé par Awin depuis plus de 13 mois : abandonné, ignoré
+MAX_FEED_AGE_DAYS = 60                       # flux que la boutique n'a pas mis à jour depuis 60 jours : ignoré (revient
+                                             # seul s'il est rafraîchi). 21/11 : 160 flux figés depuis mai = 85 749
+                                             # produits (36 % du catalogue), 42 prix changés en 5 jours, 2 comparés
 DESCRIPTION_MAX = 200
 
 FEED_COLUMNS = (
