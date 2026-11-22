@@ -55,6 +55,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
       - name: Sync catalogue (all partner feeds)
+        id: catalog
         if: ${{ !inputs.check }}
         run: python3 catalog_sync.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
@@ -66,6 +67,7 @@ jobs:
 
       # Catégories de boutique nouvelles : rayon décidé une fois par Gemini, puis appliqué aux produits
       - name: Classify new store categories (Gemini Flash)
+        id: cats
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/classify_categories.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
@@ -73,6 +75,7 @@ jobs:
 
       # Produits restés sans rayon : classés par Gemini Flash Lite d'après leur titre (offre gratuite)
       - name: Classify unassigned products (Gemini Flash Lite)
+        id: rayons
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/classify_rayons.py --max 25000 > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
@@ -80,12 +83,14 @@ jobs:
 
       # Sous-rayon d'après le titre (produits sans catégorie de boutique utilisable), après classify_categories
       - name: Classify sub-departments by title (Gemini Flash Lite)
+        id: sous
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/classify_sous_titles.py --max 20000 > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
 
       - name: Sync Awin sales and clicks
+        id: sales
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/awin_sync.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
@@ -93,6 +98,7 @@ jobs:
           AWIN_PUBLISHER_ID: ${{ secrets.AWIN_PUBLISHER_ID }}
 
       - name: Sync Awin promotions and promo codes
+        id: promos
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/awin_promotions.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
@@ -101,11 +107,28 @@ jobs:
 
       - name: Alert on failure (Telegram)
         if: failure()
+        # Message selon l'étape en échec (22/11 : un 503 des codes promo annoncé comme « relevé des prix échoué »)
         run: |
+          f=""
+          [ "$S_CATS" = failure ] && f="$f, classement des catégories"
+          [ "$S_RAYONS" = failure ] && f="$f, classement des produits"
+          [ "$S_SOUS" = failure ] && f="$f, sous-rayons"
+          [ "$S_SALES" = failure ] && f="$f, ventes Awin"
+          [ "$S_PROMOS" = failure ] && f="$f, codes promo"
+          if [ "$S_CATALOG" = failure ] || [ -z "$f" ]; then
+            msg="🚨 MyGoodPick : le relevé des prix de cette nuit a échoué. Détail : ${RUN_URL}"
+          else
+            msg="⚠️ MyGoodPick : relevé des prix réussi, mais une étape annexe a échoué (${f#, }). Le site est à jour. Détail : ${RUN_URL}"
+          fi
           curl -s --max-time 30 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
-            --data-urlencode "text=🚨 MyGoodPick : le relevé des prix de cette nuit a échoué. Détail : ${RUN_URL}" > /dev/null
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=${msg}" > /dev/null
         env:
+          S_CATALOG: ${{ steps.catalog.outcome }}
+          S_CATS: ${{ steps.cats.outcome }}
+          S_RAYONS: ${{ steps.rayons.outcome }}
+          S_SOUS: ${{ steps.sous.outcome }}
+          S_SALES: ${{ steps.sales.outcome }}
+          S_PROMOS: ${{ steps.promos.outcome }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
