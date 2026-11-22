@@ -844,16 +844,7 @@ def load_ships() -> dict[int, set]:
         return {}
 
 
-def ecb_rates() -> dict | None:
-    """Cours de référence BCE du jour (unités pour 1 euro) ; None si indisponible."""
-    try:
-        with urllib.request.urlopen("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml", timeout=30) as r:
-            xml = r.read().decode()
-        rates = {c: float(v) for c, v in re.findall(r"currency='([A-Z]{3})' rate='([0-9.]+)'", xml)}
-        return {"EUR": 1.0, "USD": rates["USD"], "GBP": rates["GBP"]}
-    except Exception as e:  # noqa: BLE001
-        print(f"  (cours BCE indisponibles : {str(e)[:120]})")
-        return None
+ecb_rates = tp.ecb_rates          # cours BCE (track_prices : sans boto3, aussi utilisé par scripts/forecast.py)
 
 
 def tp_rules() -> dict:
