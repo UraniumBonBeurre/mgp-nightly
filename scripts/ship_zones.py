@@ -51,6 +51,71 @@ MANUAL = {
     91177: EU_ALL + " GB US",      # Silverbene : « We ship worldwide »
     102989: "DE", 17471: "DE", 69970: "DE", 125128: "DE", 106791: "DE", 77278: "DE", 108408: "DE", 127385: "DE",
     63006: "ES", 121176: "IT", 129537: "IT", 131023: "DE", 131019: "FR DE", 496: "GB",
+    # Vérifications complémentaires du 22/11 ; pays explicitement desservis seulement.
+    124146: "GB",                   # GamingKit : shipping-policy
+    126641: "GB",                   # PCHUB : deliveryinfo
+    17430: "FR IT",                 # getgoods : sélecteur Lieferland ; DE à confirmer
+    128503: "IT",                   # Plusshop IT : spedizione
+    128403: "IT",                   # Bazta IT : spedizione
+    116097: "GB",                   # Bazta UK : delivery
+    69306: "GB",                    # Plusshop UK : shipping
+    67974: "US",                    # Wheel Hero : shipping-information
+    113792: "IT",                   # Clubfarma : spedizione
+    13075: "ES",                    # El Corte Inglés : ayuda/envios
+    114686: "GB",                   # Luxe Mattress : free-standard-delivery
+    43635: EU_ALL + " GB US",       # Archiproducts : faq-shop, worldwide
+    129549: "GB",                   # MoreThisWay : refund_returns
+    88751: EU_ALL + " GB US",       # PandaHall : Delivery-Fee
+    5723: "GB",                     # Lights 4 Living : delivery
+    2418: "GB",                     # Chargrilled : FAQ
+    851: "GB",                      # TV Cables : shipping
+    131192: EU_ALL + " GB US",      # ANCHOR & CREW : worldwide
+    15112: "GB",                    # Tirendo UK : FAQ
+    87779: "US",                    # Diecast Models Wholesale : shipping
+    100251: "US",                   # Shahbanu Rugs : shipping-returns
+    5190: "GB",                     # Simply LED : delivery
+    105475: "FR ES",                # Perfumeria Comas : envios-y-devoluciones
+    104931: "GB",                   # 4x4 Predator : shipping-returns
+    107550: "FR",                   # tapis.fr : paiement-expedition-retours
+    131822: "US",                   # BRND COLLECTION : shipping
+    106707: EU_ALL + " GB",         # 8wines UK : shipping, tarifs par pays
+    100931: EU_ALL + " GB US",      # Memory Cross : store.memorycross.com/meta.json
+    26643: "GB",                    # Doctor Blooms : livraison England & Wales
+    130341: "GB",                   # Cufflinks Gift Hub : faqs
+    87919: "US",                    # Flowers Fast : livraison aux États-Unis
+    117001: EU_ALL + " GB US",      # Embossed Graphics : FAQ, worldwide
+    736: "GB",                      # Cadbury : livraison UK ; international suspendu
+    53027: EU_ALL,                  # FineBuy : shipping, FR DE IT ES
+    86733: "GB US",                 # MOH : pays explicitement nommés, restrictions possibles
+    105601: "US",                   # OJCommerce : US continentaux uniquement
+    123502: "GB US",                # TurboTech : FAQ, US et UK
+    44683: "GB",                    # Cut Plastic Sheeting : livraison UK continental
+    1463: "GB",                     # Sport and Leisure UK : terms-and-conditions
+    75108: "IT",                    # New Marine : sélecteur livraison Italy
+    127489: "GB",                   # Elixir Garden Supplies : delivery
+    93695: EU_ALL + " GB US",       # Tagliapasta : site annonce livraison mondiale
+    124990: "US",                   # Superior Play : US continentaux
+    117667: "GB",                   # Pro-Camera : fiche produit, UK delivery
+    105043: "GB",                   # Japspeed : FAQ
+    50893: "GB",                    # Custom Splashbacks : delivery-returns
+    97687: EU_ALL + " GB US",       # Dragonhawk : liste par transporteur
+    126135: "FR",                   # Al Jazeera EU : France métropolitaine nommée
+    73932: EU_ALL + " GB US",       # Foreo : terms-and-conditions, worldwide
+    488: "GB",                      # Bunches : delivery
+    130505: "GB",                   # Baccus : shipping
+    105497: "US",                   # 1st Class Cigar Humidors : shipping
+    73265: "GB",                    # Gains Nutrition : shipping-returns
+    101543: "GB",                   # Skirting King : delivery
+    131827: "US",                   # Al Jazeera US : shipping-and-delivery
+    129497: EU_ALL + " GB US",      # GRABO : worldwide shipping
+    50045: "US",                    # Entosense : shipping-policy
+    70070: EU_ALL + " GB US",       # Skin Beauty Solutions : worldwide
+    25940: "US",                    # BlackboxMeats : livraison aux États-Unis
+    110972: EU_ALL + " GB US",      # Pininfarina Hybrid Watches : worldwide
+    132035: EU_ALL + " US",         # Herbs by Sonja : UE et États-Unis
+    124906: "US",                   # ALZOO : FAQ
+    32471: "DE GB US",              # Eonon : shipping notice
+    131247: "US",                   # ColabBoxus : shipping-policy
 }
 ctx = ssl.create_default_context()
 
