@@ -49,6 +49,10 @@ SALE_SIGMA = 1.0                                # dispersion de la commission d'
 KPI_MAX_AGE_DAYS = 7
 KPI_CALLS_MAX = 40                              # appels Awin par nuit (limite : 20 par minute)
 DEFAULT_KPI = {"epc": 0.15, "conversion_rate": 2.0, "approval_pct": 80.0, "currency": "EUR"}
+# Indicateurs Awin des petits programmes calculés sur une poignée de clics (22/11 : 60 $ par clic, 50 % de
+# conversion) : bornés à des valeurs plausibles pour du commerce en ligne.
+CONV_MIN, CONV_MAX = 0.1, 10.0                  # conversion, en %
+EPC_MAX_EUR = 1.5
 
 
 def season(d: date) -> float:
@@ -125,8 +129,8 @@ def merchant_mix(clicks: dict, prior: dict) -> dict:
 
 def per_sale(kpi: dict, rate_eur: float) -> tuple[float, float]:
     """(probabilité qu'un clic devienne une vente, commission moyenne d'une vente en euros)."""
-    conv = max(0.001, float(kpi.get("conversion_rate") or DEFAULT_KPI["conversion_rate"]) / 100)
-    epc = float(kpi.get("epc") or DEFAULT_KPI["epc"]) / rate_eur
+    conv = min(CONV_MAX, max(CONV_MIN, float(kpi.get("conversion_rate") or DEFAULT_KPI["conversion_rate"]))) / 100
+    epc = min(EPC_MAX_EUR, float(kpi.get("epc") or DEFAULT_KPI["epc"]) / rate_eur)
     return conv, epc / conv
 
 
