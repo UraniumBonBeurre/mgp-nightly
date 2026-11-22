@@ -28,6 +28,7 @@ import html
 import io
 import json
 import re
+import unicodedata
 import sys
 import time
 import urllib.error
@@ -179,6 +180,40 @@ NOT_A_PRODUCT = re.compile(r"\b(shipping|package|delivery|order|parcel)\s+(prote
                            r"|versandschutz|versandversicherung|protection\s+(de\s+|d.)?(colis|livraison)|assurance\s+livraison"
                            r"|^\s*(frais\s+de\s+port|shipping\s+fee|versandkosten)\b", re.IGNORECASE)
 
+# Produits pour adultes exclus du catalogue (22/11, décision du propriétaire : comparateur grand public ; Google masque
+# les sites mélangés quand SafeSearch est actif). Catégorie de la boutique ou titre/marque explicites ; préservatifs
+# gardés (santé). Faux positifs évités : vibreur à béton, lubrifiant de chaîne, blush NARS « Orgasm », parfums,
+# « jouets pour adultes » (jeux de construction), croquettes « Adult Toy & Mini », MiG-23 « Flogger ».
+ADULT_CATEGORY = re.compile(
+    r"(^|[>/|]\s*)(intimate|intimate play|lubricant & gels|cream, gel & oils)\s*$|\bsex[ -]?toys?\b|\bsextoys?\b"
+    r"|\bjouets? (sexuels?|erotiques?)\b|\berotik\w*|\berotic\w*|\berotique|\badult toys?\b|sexspielzeug"
+    r"|giocattoli (erotici|sessuali)|juguetes (eroticos|sexuales)|\bsex ?shop\b")
+ADULT_NAME = re.compile(
+    r"\b(sex[ -]?toys?|sextoys?|sex ?shop|jouets? (sexuels?|erotiques?)|vibromasseurs?|vibratori|vibradores?"
+    r"|(?<!concrete )(?<!poker )(?<!beton )vibrators?(?! motor)|vibrating (cock )?(rings?|pant(y|ies)|eggs?|bullets?|plugs?|lip balm|mascara)"
+    r"|dildos?|godes?|godemiches?|butt[ -]?plugs?|anal[ -](plugs?|beads?|sprays?|lubes?|lubricants?|toys?|serums?|creams?|douches?)"
+    r"|plugs? anal(es)?|penis(es)?|peniens?|penienne?s?|cock[ -]?rings?|ball stretchers?|masturbat\w*|(egg|super|penis) strokers?"
+    r"|fleshlight|strap[ -]?ons?|bondage|bdsm|fetish\w*|erotic|erotique|erotisch\w*|erotici|eroticos?|kamasutra|clitor\w*"
+    r"|g[ -]?spot|point g|boules? de geisha|love (eggs?|balls?)|nipple clamps?|fisting|delay (gels?|sprays?|creams?)|sex ?dolls?"
+    r"|poupees? (gonflables?|sexuelles?)|gliding cream|toy cleaner"
+    r"|(intimate|personal|water[ -]?based|silicone[ -]?based|warming|flavou?red) (lubricants?|lubes?)|lubrifiants? (intimes?|a base d.eau)"
+    r"|satisfyer|womanizer|easytoys|easyglide|pjur|screaming o|joydivision|shunga|bijoux indiscrets|oxballs|we[ -]?vibe|svakom"
+    r"|sliquid|system jo|lovehoney|ohmyg|pipedream|boners|blowyo|lelo"
+    r"|fifty shades of grey (handcuffs|pelvic\w*|vibrat\w*|floggers?|blindfolds?))\b")
+CONDOM = re.compile(r"\b(condoms?|preservatifs?|kondome?|preservativi|preservativos?)\b")
+
+
+def fold(text: str) -> str:
+    """Minuscules sans accents (« Érotique » → « erotique »)."""
+    return "".join(c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)).lower()
+
+
+def is_adult(name: str, category: str | None = None, brand: str | None = None) -> bool:
+    n = fold(f"{brand or ''} {name}")
+    if CONDOM.search(n):
+        return False
+    return bool(ADULT_NAME.search(n) or ADULT_CATEGORY.search(fold(category or "").strip()))
+
 
 def row_to_offer(row: dict, feed: Feed) -> dict | None:
     """Ligne de flux → offre, ou None si inexploitable."""
@@ -192,7 +227,7 @@ def row_to_offer(row: dict, feed: Feed) -> dict | None:
     if price and price >= PRICE_MAX:
         return None
     name = unescape_text((row.get("product_name") or "").strip())
-    if NOT_A_PRODUCT.search(name):
+    if NOT_A_PRODUCT.search(name) or is_adult(name, category, row.get("brand_name")):
         return None
     url = (row.get("merchant_deep_link") or "").strip()
     aw_id = (row.get("aw_product_id") or "").strip()

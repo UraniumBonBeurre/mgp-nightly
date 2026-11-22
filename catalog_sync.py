@@ -304,7 +304,8 @@ def offers_from_doc(doc: dict, merchant_key: str, condition: str) -> list[dict]:
              "x": None, "u": o["u"], "f": o["f"], "t": tp.unescape_text(doc["t"] or ""),
              "b": tp.unescape_text(doc["b"]) if doc.get("b") else doc.get("b"), "i": doc["i"], "cat": doc["cat"],
              "d": doc.get("d")}
-            for o in doc["o"] if o["m"] == merchant_key and o["c"] == condition and o["p"] < float(tp.PRICE_MAX)]
+            for o in doc["o"] if o["m"] == merchant_key and o["c"] == condition and o["p"] < float(tp.PRICE_MAX)
+            and not tp.is_adult(doc["t"] or "", doc.get("cat"), doc.get("b"))]
 
 
 def carry_over(failed: list, offers_by_key: dict, existing: dict) -> int:
