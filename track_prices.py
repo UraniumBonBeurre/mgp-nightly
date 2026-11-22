@@ -173,6 +173,13 @@ def unescape_text(s: str) -> str:
     return s
 
 
+# Lignes de flux qui ne sont pas des produits : assurance ou protection de livraison vendue comme un article
+# (« Shipping Protection » d'AKKO, Monsgeek… classée en périphériques, 22/11), frais de port.
+NOT_A_PRODUCT = re.compile(r"\b(shipping|package|delivery|order|parcel)\s+(protection|insurance)\b|^\s*(route|navidium|seel)\b"
+                           r"|versandschutz|versandversicherung|protection\s+(de\s+|d.)?(colis|livraison)|assurance\s+livraison"
+                           r"|^\s*(frais\s+de\s+port|shipping\s+fee|versandkosten)\b", re.IGNORECASE)
+
+
 def row_to_offer(row: dict, feed: Feed) -> dict | None:
     """Ligne de flux → offre, ou None si inexploitable."""
     category = (row.get("merchant_category") or row.get("category_name") or "").strip()
@@ -185,6 +192,8 @@ def row_to_offer(row: dict, feed: Feed) -> dict | None:
     if price and price >= PRICE_MAX:
         return None
     name = unescape_text((row.get("product_name") or "").strip())
+    if NOT_A_PRODUCT.search(name):
+        return None
     url = (row.get("merchant_deep_link") or "").strip()
     aw_id = (row.get("aw_product_id") or "").strip()
     if not (ean and price and name and url and aw_id):
