@@ -50,8 +50,15 @@ def fetch_all() -> list[dict]:
         req = urllib.request.Request(f"https://api.awin.com/publisher/{AWIN_PUBLISHER_ID}/promotions",
                                      data=json.dumps(body).encode(), method="POST",
                                      headers={"Authorization": f"Bearer {AWIN_API_TOKEN}", "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
-            d = json.loads(r.read())
+        for attempt in range(4):                 # 22/11 : 503 passager d'Awin, toute la nuit déclarée en échec
+            try:
+                with urllib.request.urlopen(req, timeout=60) as r:
+                    d = json.loads(r.read())
+                break
+            except urllib.error.HTTPError as e:
+                if e.code < 500 or attempt == 3:
+                    raise
+                time.sleep(30 * (attempt + 1))
         out += d.get("data") or []
         if page * PAGE >= (d.get("pagination") or {}).get("total", 0):
             return out
@@ -75,7 +82,16 @@ def main():
     if not (AWIN_API_TOKEN and AWIN_PUBLISHER_ID):
         sys.exit("AWIN_API_TOKEN et AWIN_PUBLISHER_ID requis")
     now = datetime.now(timezone.utc).isoformat()
-    rows = [to_row(p, now) for p in fetch_all() if p.get("title")]
+    try:
+        promos = fetch_all()
+    except urllib.error.HTTPError as e:
+        if e.code < 500:
+            raise
+        # Awin indisponible malgré les nouveaux essais : on garde les promotions de la veille (sauf expirées)
+        sb("DELETE", f"promotions?ends_at=lt.{urllib.parse.quote(now)}")
+        print(f"⚠️ API promotions d'Awin indisponible ({e.code}) : promotions de la veille gardées")
+        return
+    rows = [to_row(p, now) for p in promos if p.get("title")]
     for i in range(0, len(rows), 500):
         sb("POST", "promotions?on_conflict=promotion_id", rows[i:i + 500])
     # Plus actives (absentes de la réponse) ou expirées : supprimées.
