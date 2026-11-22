@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import unicodedata
+import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
@@ -54,6 +55,16 @@ CHANGED_ROWS_MAX = 40_000         # lignes existantes modifiées par relevé ; l
 CATALOG_MAX = 240_000
 COMPARABLE_MAX = 150_000
 SHOP_MAX = 10_000                 # par boutique et par marché, comparables compris (≈ 4 % du catalogue)
+# Pays de livraison (table merchant_ships, scripts/ship_zones.py, 22/11). Une boutique en euros est aussi affichée
+# sur les autres marchés en euros qu'elle livre (A) ; une boutique d'une autre devise qui livre un pays n'entre pas
+# dans ses comparaisons (prix en dollars ou en livres, douane possible) mais dans la page « bons plans livrés
+# depuis l'étranger » de ce marché (B, foreign_deals, fichier R2 foreign/{marché}.json.gz lu par le Worker).
+MARKET_COUNTRY = {"fr": "FR", "de": "DE", "it": "IT", "es": "ES", "uk": "GB", "us": "US"}
+MARKET_CURRENCY = {"fr": "EUR", "de": "EUR", "it": "EUR", "es": "EUR", "uk": "GBP", "us": "USD"}
+EUR_MARKETS = ("fr", "de", "it", "es")
+FOREIGN_MAX = 200                 # bons plans de l'étranger par marché
+FOREIGN_PER_SHOP = 8
+FOREIGN_MIN_PCT = 20              # remise (prix barré) ou baisse relevée minimale
 
 s3 = boto3.client(
     "s3", endpoint_url=f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com",
@@ -63,6 +74,60 @@ s3 = boto3.client(
 
 
 # ── Fonctions pures (testées dans tests/test_catalog_sync.py) ────────────────
+
+def ships_to(countries, market: str) -> bool:
+    return bool(countries) and (MARKET_COUNTRY.get(market) in countries or "*" in countries)
+
+
+def reach_markets(market: str, currency: str, awin_mid: int, ships: dict, home: set) -> list[str]:
+    """Marchés où sont affichées les offres d'un flux : le sien, puis les autres marchés en euros que la boutique
+    livre (même devise : comparables aux boutiques du pays), sauf ceux où elle a déjà un flux dans la langue."""
+    out = [market]
+    if currency == "EUR" and market in EUR_MARKETS:
+        c = ships.get(awin_mid)
+        out += [m for m in EUR_MARKETS if m != market and ships_to(c, m) and (awin_mid, m) not in home]
+    return out
+
+
+def convert(amount: float, src: str, dst: str, rates: dict) -> float:
+    """Conversion au cours BCE (rates : devise → unités pour 1 euro)."""
+    return round(amount / rates[src] * rates[dst], 2)
+
+
+def foreign_deals(products: dict, slugs: dict, ships: dict, rates: dict, today: str) -> dict[str, dict]:
+    """Bons plans livrés depuis l'étranger, par marché : produits d'une boutique d'une autre devise qui livre ce
+    pays, avec une remise (prix barré) ou une baisse relevée d'au moins FOREIGN_MIN_PCT %. Prix converti au cours
+    BCE du jour ; seulement les produits présents dans l'index (fiche d'origine consultable)."""
+    cands = []
+    for src, prods in products.items():
+        for key, prod in prods.items():
+            r, slug = prod["row"], slugs.get((src, key))
+            best = next((o for o in prod["doc"]["o"] if o["c"] == "new"), None)
+            if not (slug and best and r.get("image_url") and (r.get("min_price") or 0) >= 10):
+                continue
+            disc = round(100 * (1 - r["min_price"] / r["old_price"])) if r.get("deal_ok") and r.get("old_price") else 0
+            drop = r.get("drop_pct") or 0
+            pct, old = (disc, r["old_price"]) if disc >= drop else (drop, r.get("prev_price"))
+            if FOREIGN_MIN_PCT <= pct <= 80 and old:
+                cands.append((pct, src, key, slug, r, best["a"], old))
+    cands.sort(key=lambda c: (-c[0], c[1], c[2]))
+    out = {}
+    for target, cur in MARKET_CURRENCY.items():
+        items, per_shop = [], defaultdict(int)
+        for pct, src, key, slug, r, mid, old in cands:
+            src_cur = MARKET_CURRENCY.get(src)
+            if not src_cur or src_cur == cur or not ships_to(ships.get(mid), target) or per_shop[r["best_merchant"]] >= FOREIGN_PER_SHOP:
+                continue
+            per_shop[r["best_merchant"]] += 1
+            items.append({"s": src, "k": key, "u": slug, "t": r["title"], "b": r.get("brand"), "i": r["image_url"],
+                          "m": r["best_merchant"], "p": r["min_price"], "op": old, "c": src_cur, "pct": pct,
+                          "x": convert(r["min_price"], src_cur, cur, rates), "xo": convert(old, src_cur, cur, rates)})
+            if len(items) == FOREIGN_MAX:
+                break
+        if items:
+            out[target] = {"date": today, "currency": cur, "rates": rates, "items": items}
+    return out
+
 
 def shard_of(key: str) -> str:
     return hashlib.sha1(key.encode()).hexdigest()[:SHARD_HEX]
@@ -276,7 +341,8 @@ def build_product(key: str, offers: list[dict], today: str) -> dict | None:
         active = [o for o in active if o["c"] != "new" or o["p"] <= cap]
     best = new[0]
     # Titre : le plus complet des offres neuves (à égalité, celui de la moins chère)
-    title = tidy_title(max(new, key=lambda o: (title_score(o["t"], o["b"]), -o["p"]))["t"] or best["t"] or "")
+    # Offres d'une boutique d'un autre pays (A, « ext ») : leur titre n'est pris qu'à défaut (autre langue).
+    title = tidy_title(max(new, key=lambda o: (not o.get("ext"), title_score(o["t"], o["b"]), -o["p"]))["t"] or best["t"] or "")
     fresh = best["f"] is None or best["f"] >= (datetime.fromisoformat(today) - timedelta(days=STALE_DAYS)).date().isoformat()
     refurb = [o["p"] for o in active if o["c"] == "refurbished"]
     disc = round(100 * (1 - best["p"] / best["o"])) if best["o"] and best["o"] > best["p"] else None
@@ -290,11 +356,26 @@ def build_product(key: str, offers: list[dict], today: str) -> dict | None:
     }
     doc = {
         "k": key, "t": title, "b": best["b"], "i": best["i"], "cat": best["cat"],
-        "d": next((o["d"] for o in sorted(active, key=lambda o: o["p"]) if o.get("d")), None),
+        "d": next((o["d"] for o in sorted(active, key=lambda o: (bool(o.get("ext")), o["p"])) if o.get("d")), None),
         "o": [{"id": f"{o['m']}-{o['c'][0]}", "m": o["m"], "n": o["n"], "a": o["a"], "p": o["p"], "op": o["o"],
                "c": o["c"], "u": o["u"], "f": o["f"], "h": o["h"]} for o in sorted(active, key=lambda o: o["p"])],
     }
     return {"row": row, "doc": doc}
+
+
+def spare_removals(dropped: list, existing, products: dict, limit: int) -> list:
+    """Produits de l'index écartés par la sélection (part de chaque boutique réduite par l'arrivée de boutiques) :
+    au plus `limit` retirés par relevé, autant que de nouveaux produits ajoutés, pour que l'index ne rétrécisse pas
+    (22/11 : les pays de livraison ajoutaient 164 boutiques par marché, 38 915 fiches seraient sorties d'un coup).
+    Les moins utiles sortent d'abord : ni comparées, ni bon plan ou baisse. Renvoie la liste des produits à retirer."""
+    out = [mk for mk in dropped if mk not in existing]
+    old = [mk for mk in dropped if mk in existing]
+
+    def value(mk):
+        r = products[mk[0]][mk[1]]["row"]
+        return ((r.get("merchants_count") or 0) >= 2, bool(r.get("deal_ok") or r.get("drop_pct")),
+                hashlib.sha1(f"{mk[0]}:{mk[1]}".encode()).hexdigest())
+    return out + sorted(old, key=value)[:limit]
 
 
 def offers_from_doc(doc: dict, merchant_key: str, condition: str) -> list[dict]:
@@ -504,6 +585,12 @@ def main():
     ok = not failed
     print(f"Partenaires : {len(partners)} flux, {len(resolved)} dans un marché, {len(chosen)} retenus "
           f"(une langue par boutique et par marché)")
+    ships = load_ships()
+    home = {(f.awin_mid, f.market) for f in feeds}
+    reach = {f.feed_id: reach_markets(f.market, f.currency, f.awin_mid, ships, home) for f in feeds}
+    ext = [(f.merchant_key, m) for f in feeds for m in reach[f.feed_id][1:]]
+    print(f"Pays de livraison : {len(ships)} boutiques connues ; {len(ext)} affichages sur un autre marché en euros "
+          f"({ {m: sum(1 for _, x in ext if x == m) for m in EUR_MARKETS} })")
 
     # Produits comparables : codes EAN présents dans au moins deux boutiques d'un même marché (colonne EAN
     # seule, ~20 s pour tous les flux). Les flux plafonnés les gardent en priorité (tp.select_offers).
@@ -516,8 +603,9 @@ def main():
     with ThreadPoolExecutor(max_workers=6) as ep:
         owners: dict[str, dict[str, set]] = defaultdict(lambda: defaultdict(set))
         for f, eans in ep.map(eans_of, feeds):
-            for e in eans:
-                owners[f.market][e].add(f.merchant_key)
+            for m in reach[f.feed_id]:
+                for e in eans:
+                    owners[m][e].add(f.merchant_key)
     prefer = {m: frozenset(e for e, who in d.items() if len(who) >= 2) for m, d in owners.items()}
     del owners
     print("Produits comparables (EAN chez ≥ 2 boutiques) :", {m: len(v) for m, v in prefer.items()})
@@ -526,7 +614,8 @@ def main():
         """Téléchargement (flux Awin + état R2), en parallèle : la durée de la tâche CI est facturée."""
         prev = r2_get_json(f"{PREFIX}/state/{feed.feed_id}.json.gz") or {}
         keep = frozenset(aw for aw, v in prev.items() if not v.get("x"))     # retenues au relevé précédent
-        return feed, tp.download_feed(feed, prefer.get(feed.market, frozenset()), keep), prev
+        wanted = frozenset().union(*(prefer.get(m, frozenset()) for m in reach[feed.feed_id]))
+        return feed, tp.download_feed(feed, wanted, keep), prev
 
     pool = ThreadPoolExecutor(max_workers=4)
     futures = [(f, pool.submit(fetch, f)) for f in feeds]
@@ -560,22 +649,26 @@ def main():
                     if not args.dry_run:
                         s3.delete_object(Bucket=R2_BUCKET_NAME, Key=guard_key)
                 state, t = update_state(prev, incoming, today)
-            touched |= {(feed.market, k) for k in t}
+            for m in reach[feed.feed_id]:
+                touched |= {(m, k) for k in t}
             if t or not prev or args.bootstrap:
                 pending_states.append((state_key, state))
             for aw, o in incoming.items():
                 st = state[aw]
-                offers_by_key[(feed.market, o["ean"])].append({
-                    "m": feed.merchant_key, "n": feed.merchant_name or feed.merchant_key, "a": feed.awin_mid,
-                    "p": st["p"], "o": st["o"], "s": st["s"], "c": st["c"], "h": st["h"], "x": None,
-                    "u": o["merchant_url"], "f": feed.last_imported, "t": o["name"], "b": o["brand"],
-                    "i": o["image_url"], "cat": o["merchant_category"], "d": o["description"],
-                })
+                for m in reach[feed.feed_id]:     # marché du flux, puis marchés en euros livrés (offre « ext »)
+                    offers_by_key[(m, o["ean"])].append({
+                        "m": feed.merchant_key, "n": feed.merchant_name or feed.merchant_key, "a": feed.awin_mid,
+                        "p": st["p"], "o": st["o"], "s": st["s"], "c": st["c"], "h": st["h"], "x": None,
+                        "u": o["merchant_url"], "f": feed.last_imported, "t": o["name"], "b": o["brand"],
+                        "i": o["image_url"], "cat": o["merchant_category"], "d": o["description"],
+                        **({"ext": True} if m != feed.market else {}),
+                    })
             feeds_rows.append({"feed_id": feed.feed_id, "merchant_key": feed.merchant_key,
                                "merchant_name": feed.merchant_name or feed.merchant_key, "awin_mid": feed.awin_mid,
                                "market": feed.market, "currency": feed.currency, "last_imported": feed.last_imported,
                                "offers": len(incoming), "updated_at": run_start})
-            print(f"  flux {feed.feed_id} ({feed.merchant_key}, {feed.market}) : {len(incoming)} offres, {len(t)} produits touchés")
+            more = f" + {','.join(reach[feed.feed_id][1:])}" if len(reach[feed.feed_id]) > 1 else ""
+            print(f"  flux {feed.feed_id} ({feed.merchant_key}, {feed.market}{more}) : {len(incoming)} offres, {len(t)} produits touchés")
         except Exception as e:  # un flux en échec n'empêche pas les autres
             print(f"  ✗ flux {orig.feed_id} : {str(e)[:200]}")
             failed.append(orig)
@@ -614,6 +707,10 @@ def main():
     owner = {(m, k): p["row"]["best_merchant"] for m, prods in products.items() for k, p in prods.items()}
     kept, cap = select_catalog(products, owner, existing)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
+    n_old = sum(1 for mk in dropped if mk in existing)
+    dropped = spare_removals(dropped, existing, products, args.new_max)
+    if n_old > args.new_max:
+        print(f"Retraits de l'index plafonnés : {args.new_max} sur {n_old} (le reste aux prochains relevés)")
     for m, k in dropped:
         del products[m][k]
     print(f"Catalogue : {len(kept)} produits gardés sur {total} (au plus {cap} par boutique hors comparables) ; "
@@ -662,7 +759,11 @@ def main():
             dirty_shards[market] |= every
     if args.reindex:
         dirty_shards.clear()
+    slugs = {mk: v["slug"] for mk, v in existing.items()}
     if args.dry_run:
+        slugs.update({(r["market"], r["ean"]): r["slug"] for r in rows})
+        fd = foreign_deals(products, slugs, ships, ecb_rates() or {"EUR": 1.0, "USD": 1.1, "GBP": 0.85}, today)
+        print(f"[dry-run] bons plans de l'étranger : { {m: len(v['items']) for m, v in fd.items()} }")
         print(f"[dry-run] fragments à écrire : { {m: len(s) for m, s in dirty_shards.items()} }")
         print(f"[dry-run] lignes d'index à écrire : {len(rows)} (dont {sum(1 for r in rows if (r['market'], r['ean']) not in existing)} nouvelles)")
         rows_all = [p["row"] for m in products.values() for p in m.values()]
@@ -716,12 +817,43 @@ def main():
     except RuntimeError as e:
         print(f"  (nettoyage de l'index de recherche : {str(e)[:120]})")
     print(f"Supabase : {len(rows)} produits écrits, {len(gone)} remis à zéro")
+    try:   # B : bons plans livrés depuis l'étranger (page du Worker), fiches présentes dans l'index seulement
+        rates = ecb_rates()
+        if rates:
+            slugs.update({(r["market"], r["ean"]): r["slug"] for r in rows})
+            fd = foreign_deals(products, slugs, ships, rates, today)
+            for m in MARKET_CURRENCY:
+                r2_put_json(f"foreign/{m}.json.gz", fd.get(m, {"date": today, "items": []}), cache_seconds=0)
+            print(f"Bons plans de l'étranger (R2) : { {m: len(v['items']) for m, v in fd.items()} }")
+    except Exception as e:  # noqa: BLE001 — la sélection de la veille reste en place
+        print(f"  ⚠ bons plans de l'étranger non écrits : {str(e)[:150]}")
     tp.notify_indexnow(run_start)
     try:   # sitemap servi par le Worker (après l'index : il reprend les fiches du jour)
         print(f"Sitemap (R2) : {write_sitemaps()}")
     except Exception as e:  # noqa: BLE001 — le sitemap de la veille reste en place
         print(f"  ⚠ sitemap non écrit : {str(e)[:150]}")
     sys.exit(0 if ok else 1)
+
+
+def load_ships() -> dict[int, set]:
+    """Pays de livraison par boutique (merchant_ships) ; table illisible : chaque boutique reste sur son marché."""
+    try:
+        return {r["awin_mid"]: set(r["countries"]) for r in tp._sb("GET", "merchant_ships?select=awin_mid,countries&limit=5000")}
+    except RuntimeError as e:
+        print(f"  (pays de livraison illisibles : {str(e)[:120]})")
+        return {}
+
+
+def ecb_rates() -> dict | None:
+    """Cours de référence BCE du jour (unités pour 1 euro) ; None si indisponible."""
+    try:
+        with urllib.request.urlopen("https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml", timeout=30) as r:
+            xml = r.read().decode()
+        rates = {c: float(v) for c, v in re.findall(r"currency='([A-Z]{3})' rate='([0-9.]+)'", xml)}
+        return {"EUR": 1.0, "USD": rates["USD"], "GBP": rates["GBP"]}
+    except Exception as e:  # noqa: BLE001
+        print(f"  (cours BCE indisponibles : {str(e)[:120]})")
+        return None
 
 
 def tp_rules() -> dict:
