@@ -24,6 +24,9 @@ concurrency:
 env:
   NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
   SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  # Compteurs des pages recalculés une seule fois, à la fin (étape « Refresh page counters ») : chaque calcul relit
+  # toute la table ; 4 à 6 par nuit épuisaient le budget d'accès disque de la base gratuite (22/11).
+  SKIP_STATS_REFRESH: "1"
 
 jobs:
   nightly:
@@ -85,9 +88,15 @@ jobs:
       - name: Classify sub-departments by title (Gemini Flash Lite)
         id: sous
         if: ${{ always() && !inputs.check }}
-        run: python3 scripts/classify_sous_titles.py --max 20000 > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
+        run: python3 scripts/classify_sous_titles.py --max 8000 > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+
+      - name: Refresh page counters (once)
+        id: counters
+        if: ${{ always() && !inputs.check }}
+        run: |
+          python3 -c "import sys; sys.path.insert(0, 'scripts'); from classify_rayons import sb; sb('POST', 'rpc/refresh_site_stats', {}); sb('POST', 'rpc/refresh_sous_rayon_stats', {})"
 
       - name: Sync Awin sales and clicks
         id: sales
@@ -113,6 +122,7 @@ jobs:
           [ "$S_CATS" = failure ] && f="$f, classement des catégories"
           [ "$S_RAYONS" = failure ] && f="$f, classement des produits"
           [ "$S_SOUS" = failure ] && f="$f, sous-rayons"
+          [ "$S_COUNTERS" = failure ] && f="$f, compteurs des pages"
           [ "$S_SALES" = failure ] && f="$f, ventes Awin"
           [ "$S_PROMOS" = failure ] && f="$f, codes promo"
           if [ "$S_CATALOG" = failure ] || [ -z "$f" ]; then
@@ -127,6 +137,7 @@ jobs:
           S_CATS: ${{ steps.cats.outcome }}
           S_RAYONS: ${{ steps.rayons.outcome }}
           S_SOUS: ${{ steps.sous.outcome }}
+          S_COUNTERS: ${{ steps.counters.outcome }}
           S_SALES: ${{ steps.sales.outcome }}
           S_PROMOS: ${{ steps.promos.outcome }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

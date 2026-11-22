@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from classify_rayons import BATCH, MODELS, WORKERS, ask_gemini, sb  # noqa: E402  (charge aussi settings / .env.local)
+from classify_rayons import BATCH, MODELS, WORKERS, ask_gemini, refresh_stats, sb  # noqa: E402  (charge aussi settings / .env.local)
 from settings import GOOGLE_AI_API_KEY  # noqa: E402
 from sous_rayons import TAXONOMY  # noqa: E402
 
@@ -68,8 +68,7 @@ def main():
             break
     print(f"Classés par leur titre : {done} ({moved} changés de rayon) ; indécis : {none} ; {time.monotonic() - t0:.0f} s")
     if total_seen:
-        sb("POST", "rpc/refresh_site_stats", {})
-        sb("POST", "rpc/refresh_sous_rayon_stats", {})
+        refresh_stats("refresh_site_stats", "refresh_sous_rayon_stats")
 
 
 def process(todo: list[dict], opts: dict[str, str], args) -> tuple[int, int, int]:

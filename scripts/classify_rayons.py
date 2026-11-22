@@ -19,6 +19,7 @@ Usage :
 
 import argparse
 import json
+import os
 import random
 import sys
 import time
@@ -46,6 +47,16 @@ def sb(method: str, path: str, body=None):
     with urllib.request.urlopen(req, timeout=120) as r:
         raw = r.read()
         return json.loads(raw) if raw else None
+
+
+def refresh_stats(*functions: str):
+    """Compteurs des pages recalculés (chaque appel relit toute la table products_ean). Pendant le relevé de nuit
+    (SKIP_STATS_REFRESH=1), une seule fois à la fin (jobs/nightly.yml) : 4 à 6 relectures par nuit épuisaient le
+    budget d'accès disque de la base gratuite (alerte Supabase « Disk IO Budget », 22/11)."""
+    if os.environ.get("SKIP_STATS_REFRESH") == "1":
+        return
+    for f in functions:
+        sb("POST", f"rpc/{f}", {})
 
 
 def classify(products: list[dict], rayons: list[dict]) -> dict[int, str]:
@@ -136,7 +147,7 @@ def main():
                 print(f"  {n}/{len(batches)} lots, {done} classés, {kept} laissés en « autres » ({time.monotonic() - t0:.0f} s)")
     print(f"Classés par Gemini : {done} ; laissés en « autres » : {kept} ; {time.monotonic() - t0:.0f} s")
     if todo:
-        sb("POST", "rpc/refresh_site_stats", {})        # les compteurs par rayon suivent le nouveau classement
+        refresh_stats("refresh_site_stats")             # les compteurs par rayon suivent le nouveau classement
 
 
 if __name__ == "__main__":

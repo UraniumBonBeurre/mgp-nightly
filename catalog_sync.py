@@ -19,6 +19,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -704,7 +705,8 @@ def main():
     print(f"R2 : {len(pending_states)} états de flux écrits")
     tp._sb("POST", "feeds?on_conflict=feed_id", feeds_rows, prefer="resolution=merge-duplicates,return=minimal")
     tp._sb("POST", "rpc/refresh_brand_index", {})
-    tp._sb("POST", "rpc/refresh_site_stats", {})        # compteurs des pages (rayons, comparés, bons plans)
+    if os.environ.get("SKIP_STATS_REFRESH") != "1":      # relevé de nuit : une fois à la fin (jobs/nightly.yml)
+        tp._sb("POST", "rpc/refresh_site_stats", {})    # compteurs des pages (rayons, comparés, bons plans)
     try:   # chiffres du tableau de bord /stats (lecture instantanée ; ~30 s de calcul, une fois par nuit)
         tp._sb("POST", "rpc/refresh_dashboard_cache", {})
     except RuntimeError as e:

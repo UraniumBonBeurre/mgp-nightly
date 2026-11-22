@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from classify_rayons import WORKERS, ask_gemini, sb  # noqa: E402  (charge aussi settings / .env.local)
+from classify_rayons import WORKERS, ask_gemini, refresh_stats, sb  # noqa: E402  (charge aussi settings / .env.local)
 from settings import GOOGLE_AI_API_KEY  # noqa: E402
 
 BATCH = 200
@@ -164,8 +164,7 @@ def main():
         if sous:
             print(f"Sous-rayons : {sum(sous.values())} catégories ({dict(sous.most_common(5))}…)")
         print(f"Produits classés en sous-rayon : {apply_sous()}")
-        sb("POST", "rpc/refresh_site_stats", {})
-        sb("POST", "rpc/refresh_sous_rayon_stats", {})
+        refresh_stats("refresh_site_stats", "refresh_sous_rayon_stats")
 
 
 if __name__ == "__main__":
