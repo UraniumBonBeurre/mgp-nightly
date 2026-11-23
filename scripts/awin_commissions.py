@@ -158,7 +158,11 @@ def main():
             sig = signature(groups)
             if not groups or all(sigs.get((mid, r)) == sig for r in RAYONS):
                 continue
-            mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
+            try:
+                mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
+            except RuntimeError as e:                         # Gemini surchargé pour cette boutique : au relevé suivant
+                print(f"  {names[mid]} : rayons non associés ({str(e)[:80]})")
+                continue
             sb("POST", "merchant_rayon_rates?on_conflict=awin_mid,rayon", [{"awin_mid": mid, "rayon": r, "group_code": g["group_code"] if g else None,
                "pct": g["pct"] if g else None, "signature": sig if exact else ""} for r, g in mapping.items()])
             n_mapped += 1
@@ -183,10 +187,9 @@ def main():
             continue                                          # mêmes groupes : correspondance des rayons inchangée
         try:
             mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
-        except RuntimeError as e:                             # quota Gemini : taux par défaut, Gemini au relevé suivant
-            print(f"  Gemini indisponible ({str(e)[:80]}) : taux par défaut pour les rayons des boutiques suivantes")
-            use_gemini = False
-            mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
+        except RuntimeError as e:                             # Gemini surchargé : taux par défaut, Gemini au relevé suivant
+            print(f"  {names[mid]} : rayons non associés ({str(e)[:80]}), taux par défaut en attendant")
+            mapping, exact = map_rayons(mid, names[mid], groups, False)
         rows = [{"awin_mid": mid, "rayon": r, "group_code": g["group_code"] if g else None, "pct": g["pct"] if g else None,
                  "signature": sig if exact else ""} for r, g in mapping.items()]
         if rows:
