@@ -11,7 +11,11 @@ Chaque nuit (après la synchronisation des ventes Awin), simule SIMS trajectoire
   clics/jour     ~ Poisson(visites × taux de clic)          taux de clic : loi Beta d'après les 14 derniers jours
   ventes/jour    ~ Poisson(clics × Σ part_boutique × conversion_boutique × saison)
                    + ventes encore possibles des clics passés (cookie de 30 jours)
-  commission     par vente : EPC ÷ conversion de la boutique (Awin, tous éditeurs), loi log-normale ; en euros
+  commission     par vente : EPC ÷ conversion de la boutique (Awin, tous éditeurs), loi log-normale ; en euros.
+                 23/11 : mêlée à la commission des produits réellement cliqués (prix hors TVA × taux de la boutique
+                 pour le rayon, scripts/awin_commissions.py), d'autant plus que la boutique a de clics
+  effet du prix  un produit plus cher que le panier moyen de la boutique se vend moins souvent (élasticité 0,3)
+  trafic         saison des visites (semaine du Black Friday, Noël) en plus de celle de la conversion
   validées       commission × taux de validation de la boutique
 
 Part des clics par boutique : clics observés + a priori proportionnel aux offres du catalogue (marchés visités).
@@ -59,6 +63,45 @@ DEFAULT_KPI = {"epc": 0.15, "conversion_rate": 2.0, "approval_pct": 80.0, "curre
 # conversion) : bornés à des valeurs plausibles pour du commerce en ligne.
 CONV_MIN, CONV_MAX = 0.1, 10.0                  # conversion, en %
 EPC_MAX_EUR = 1.5
+# Produits cliqués (23/11) : commission estimée d'après le prix et le taux du rayon, mêlée à la moyenne Awin
+CLICK_PRIOR = 5                                 # poids (en clics) de la moyenne Awin face aux produits cliqués
+PRICE_ELASTICITY = 0.3                          # conversion × (panier moyen / prix)^0,3 : un produit 4× plus cher → ×0,66
+PRICE_FACTOR = (0.5, 1.5)
+VAT = {"fr": 0.2, "en": 0.2, "uk": 0.2, "de": 0.19, "it": 0.22, "es": 0.21, "us": 0.0}
+MARKET_CURRENCY = {"uk": "GBP", "us": "USD"}
+
+
+def traffic_season(d: date) -> float:
+    """Multiplicateur des visites selon la période (recherches de bons plans et de cadeaux ; hypothèses prudentes)."""
+    md = (d.month, d.day)
+    if md in ((11, 27), (11, 30)):
+        return 1.5                                   # Black Friday, Cyber Monday
+    if (11, 24) <= md <= (12, 1):
+        return 1.25
+    if (12, 2) <= md <= (12, 20):
+        return 1.1
+    if (12, 24) <= md <= (12, 26):
+        return 0.8
+    return 1.0
+
+
+def click_adjust(conv: float, per_sale_awin: float, products: list[tuple[float, float]], avg_pct: float | None) -> tuple[float, float, dict]:
+    """Conversion et commission par vente d'une boutique, corrigées par les produits réellement cliqués.
+    products : [(prix hors TVA en euros, taux en %)] ; avg_pct : taux moyen de la boutique (panier moyen Awin =
+    commission moyenne ÷ taux). Sans clic : valeurs Awin inchangées."""
+    n = len(products)
+    if not n:
+        return conv, per_sale_awin, {}
+    own = sum(p * r / 100 for p, r in products) / n
+    w = n / (n + CLICK_PRIOR)
+    per = w * own + (1 - w) * per_sale_awin
+    factor = 1.0
+    if avg_pct and avg_pct > 0:
+        basket = per_sale_awin / (avg_pct / 100)                     # panier moyen des acheteurs Awin
+        price = sum(p for p, _ in products) / n
+        factor = min(PRICE_FACTOR[1], max(PRICE_FACTOR[0], (basket / price) ** PRICE_ELASTICITY)) if price > 0 else 1.0
+    return conv * (w * factor + (1 - w)), per, {"own_eur": round(own, 2), "clicks": n, "price_factor": round(factor, 2),
+                                                 "basket_eur": round(per_sale_awin / (avg_pct / 100), 0) if avg_pct else None}
 
 
 def season(d: date) -> float:
@@ -200,6 +243,7 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
 
     days = [start + timedelta(days=t) for t in range(1, horizon + 1)]
     seas = [season(d) for d in days]
+    tseas = [traffic_season(d) for d in days]
     # Ventes encore possibles des clics passés : probabilité restante d'achat (cookie) répartie sur les jours à venir
     pend = [0.0] * horizon
     for age, m in inputs.get("pending", []):
@@ -214,7 +258,7 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
     per_sale_eur = sum(weights[m] * sale[m][1] for m in ms) / wsum
     approval_avg = sum(weights[m] * inputs["approval"].get(m, DEFAULT_KPI["approval_pct"]) for m in ms) / wsum / 100
     ctr_mean = (1 + inputs["clicks14"]) / (2 + inputs["sessions14"])
-    c_sess = sessions_path(inputs["s0"], inputs["growth"], TAU_MEDIAN, horizon)
+    c_sess = [v * f for v, f in zip(sessions_path(inputs["s0"], inputs["growth"], TAU_MEDIAN, horizon), tseas)]
     c_lam = [0.0] * horizon
     for t in range(horizon):
         for k, p in enumerate(LAG):
@@ -232,7 +276,7 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
         eff = rng.lognormvariate(0.0, QUALITY_SIGMA) * rng.uniform(*TRACKING)   # qualité du trafic × ventes attribuées
         effs.append(eff)
         ctr = rng.betavariate(1 + inputs["clicks14"], 1 + max(0, inputs["sessions14"] - inputs["clicks14"]))
-        sess = sessions_path(inputs["s0"], g0, tau, horizon)
+        sess = [v * f for v, f in zip(sessions_path(inputs["s0"], g0, tau, horizon), tseas)]
         lam_conv = [0.0] * (horizon + len(LAG))
         first = None
         for t in range(horizon):
@@ -314,7 +358,7 @@ def paged(path: str) -> list[dict]:
 
 
 def daily_series(since: str) -> tuple[list[dict], dict]:
-    rows = paged(f"site_events?select=ts,type,session_id,merchant_key&excluded=is.false&ts=gte.{since}&type=in.(pageview,outbound)")
+    rows = paged(f"site_events?select=ts,type,session_id,merchant_key,market,ean&excluded=is.false&ts=gte.{since}&type=in.(pageview,outbound)")
     by = defaultdict(lambda: {"s": set(), "c": 0})
     clicks_by_merchant = defaultdict(list)
     for r in rows:
@@ -324,7 +368,7 @@ def daily_series(since: str) -> tuple[list[dict], dict]:
         elif r["type"] == "outbound":
             by[d]["c"] += 1
             if r.get("merchant_key"):
-                clicks_by_merchant[r["merchant_key"]].append(d)
+                clicks_by_merchant[r["merchant_key"]].append((d, r.get("market"), r.get("ean")))
     return [{"day": d, "sessions": len(v["s"]), "clicks": v["c"]} for d, v in sorted(by.items())], clicks_by_merchant
 
 
@@ -367,7 +411,7 @@ def main():
         if mid is None:
             continue
         clicks[mid] += len(days_)
-        for d in days_:
+        for d, _, _ in days_:
             age = (today - date.fromisoformat(d)).days
             if age < len(LAG):
                 pending.append((age, mid))
@@ -396,13 +440,44 @@ def main():
         cur = (k.get("currency") or "EUR").upper()
         sale[m] = per_sale({**DEFAULT_KPI, **{x: v for x, v in k.items() if v is not None}}, rates.get(cur, 1.0))
         approval[m] = float(k.get("approval_pct") or DEFAULT_KPI["approval_pct"])
+    # Produits cliqués : prix (index du catalogue) et taux de la boutique pour leur rayon
+    clicked = defaultdict(list)                                   # boutique → [(marché, produit)]
+    for mk, days_ in clicks_by_merchant.items():
+        if mid_of.get(mk) in sale:
+            clicked[mid_of[mk]] += [(mkt, e) for _, mkt, e in days_ if mkt and e]
+    keys = {(mkt, e) for v in clicked.values() for mkt, e in v}
+    prod = {}
+    for mkt in {k[0] for k in keys}:
+        eans = sorted(e for m2, e in keys if m2 == mkt)
+        for i in range(0, len(eans), 100):
+            for r in sb("GET", f"products_ean?select=ean,rayon,min_price&market=eq.{mkt}&ean=in.({','.join(eans[i:i + 100])})") or []:
+                prod[(mkt, r["ean"])] = r
+    rr = defaultdict(dict)
+    if clicked:
+        for r in sb("GET", f"merchant_rayon_rates?select=awin_mid,rayon,pct&awin_mid=in.({','.join(map(str, clicked))})") or []:
+            if r["pct"] is not None:
+                rr[r["awin_mid"]][r["rayon"]] = float(r["pct"])
+    adjust = {}
+    for m, items in clicked.items():
+        products = []
+        for mkt, e in items:
+            p = prod.get((mkt, e))
+            pct = rr[m].get((p or {}).get("rayon") or "autres") if p else None
+            if p and p.get("min_price") and pct:
+                eur_price = float(p["min_price"]) / rates.get(MARKET_CURRENCY.get(mkt, "EUR"), 1.0)
+                products.append((eur_price / (1 + VAT.get(mkt, 0.2)), pct))
+        avg_pct = sum(rr[m].values()) / len(rr[m]) if rr[m] else None
+        c, per, info = click_adjust(sale[m][0], sale[m][1], products, avg_pct)
+        if info:
+            adjust[m] = {**info, "awin_eur": round(sale[m][1], 2)}
+            sale[m] = (c, per)
     conv = sb("GET", f"conversions?select=transaction_date,commission,status&transaction_date=gte.{since}&limit=5000") or []
     # Apprentissage : ventes attendues des clics passés (s'ils achetaient comme la moyenne Awin) vs ventes observées
     exposure = 0.0
     for mk, days_ in clicks_by_merchant.items():
         mid = mid_of.get(mk)
         conv_m = sale[mid][0] if mid in sale else DEFAULT_KPI["conversion_rate"] / 100
-        for d in days_:
+        for d, _, _ in days_:
             age = (today - date.fromisoformat(d)).days
             exposure += conv_m * min(1.0, sum(LAG[:age + 1]))
     observed_sales = sum(1 for c in conv if c.get("status") != "declined")
@@ -429,8 +504,11 @@ def main():
             "pending_clicks": len(pending), "lag_same_day": LAG[0],
             "observed_exposure": round(exposure, 2), "observed_sales": observed_sales, "quality_post": round(res["quality_post"], 2),
             "stall_p": STALL_P, "quality_sigma": QUALITY_SIGMA, "tracking": list(TRACKING), "growth_min": GROWTH_MIN,
+            "products_clicked": sum(a["clicks"] for a in adjust.values()),
+            "price_factor_avg": round(sum(a["price_factor"] * a["clicks"] for a in adjust.values()) / max(1, sum(a["clicks"] for a in adjust.values())), 2),
+            "traffic_season": True,
             "top_merchants": [{"name": names[m] or str(m), "share": round(mix[m], 3), "conv_pct": round(sale[m][0] * 100, 2),
-                               "per_sale_eur": round(sale[m][1], 2), "approval": approval[m]}
+                               "per_sale_eur": round(sale[m][1], 2), "approval": approval[m], **adjust.get(m, {})}
                               for m in sorted(mix, key=lambda m: -mix[m])[:8]],
         },
     }
