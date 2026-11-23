@@ -140,6 +140,31 @@ def per_sale(kpi: dict, rate_eur: float) -> tuple[float, float]:
     return conv, epc / conv
 
 
+def wpercentile(values: list[float], weights: list[float], q: float) -> float:
+    """Percentile pondéré (poids des simulations selon les ventes réellement observées)."""
+    pairs = sorted(zip(values, weights))
+    tot = sum(weights) or 1.0
+    acc = 0.0
+    for v, w in pairs:
+        acc += w
+        if acc >= q * tot:
+            return v
+    return pairs[-1][0] if pairs else 0.0
+
+
+def observed_weights(effs: list[float], exposure: float, sales: int) -> list[float]:
+    """Poids de chaque simulation : vraisemblance (loi de Poisson) des ventes réellement observées sur les clics passés.
+    exposure = ventes attendues des clics passés si les visiteurs achetaient comme la moyenne Awin ; eff = facteur
+    « qualité du trafic × ventes attribuées » de la simulation. Beaucoup de clics sans vente : les simulations à faible
+    conversion pèsent plus ; des ventes : l'inverse. Sans historique, tous les poids sont égaux."""
+    logs = []
+    for e in effs:
+        lam = exposure * e
+        logs.append(-lam + (sales * math.log(lam) if sales and lam > 0 else (0.0 if not sales else -1e9)))
+    top = max(logs) if logs else 0.0
+    return [math.exp(v - top) for v in logs]
+
+
 def percentile(sorted_vals: list[float], q: float) -> float:
     if not sorted_vals:
         return 0.0
@@ -200,10 +225,12 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
     validated = [[0.0] * sims for _ in range(horizon)]
     sales_out = [[0] * sims for _ in range(horizon)]
     first_sale = []
+    effs = []
     for s in range(sims):
         g0 = min(GROWTH_MAX, max(GROWTH_MIN, rng.gauss(inputs["growth"], inputs["growth_se"])))
         tau = rng.uniform(*STALL_TAU) if rng.random() < STALL_P else rng.lognormvariate(math.log(TAU_MEDIAN), TAU_SIGMA)
         eff = rng.lognormvariate(0.0, QUALITY_SIGMA) * rng.uniform(*TRACKING)   # qualité du trafic × ventes attribuées
+        effs.append(eff)
         ctr = rng.betavariate(1 + inputs["clicks14"], 1 + max(0, inputs["sessions14"] - inputs["clicks14"]))
         sess = sessions_path(inputs["s0"], g0, tau, horizon)
         lam_conv = [0.0] * (horizon + len(LAG))
@@ -226,6 +253,10 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             if n and first is None:
                 first = t
         first_sale.append(first)
+    exposure, observed_sales = inputs.get("observed", (0.0, 0))
+    w = observed_weights(effs, exposure, observed_sales)
+    wsum_sims = sum(w)
+    share = lambda flags: round(sum(wi for wi, f in zip(w, flags) if f) / wsum_sims, 3)   # noqa: E731
     out_days, cum = [], [0.0] * sims
     cum_val = [0.0] * sims
     c_cum = 0.0
@@ -233,23 +264,21 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
         for s in range(sims):
             cum[s] += daily[t][s]
             cum_val[s] += validated[t][s]
-        csorted = sorted(cum)
         c_cum += c_sales[t] * per_sale_eur
         out_days.append({
             "day": days[t].isoformat(),
             "sessions": round(c_sess[t], 1), "clicks": round(c_sess[t] * ctr_mean, 1),       # scénario central
             "sales": round(c_sales[t], 3), "revenue": round(c_sales[t] * per_sale_eur, 2),
             "validated": round(c_sales[t] * per_sale_eur * approval_avg, 2), "cum": round(c_cum, 2),
-            "cum_p10": round(percentile(csorted, 0.1), 2), "cum_p25": round(percentile(csorted, 0.25), 2),
-            "cum_p50": round(percentile(csorted, 0.5), 2), "cum_p75": round(percentile(csorted, 0.75), 2),
-            "cum_p90": round(percentile(csorted, 0.9), 2),
-            "val_p50": round(percentile(sorted(cum_val), 0.5), 2),
-            "p_sale_day": round(sum(1 for v in sales_out[t] if v) / sims, 3),
-            "p_first_sale": round(sum(1 for f in first_sale if f is not None and f <= t) / sims, 3),
+            **{f"cum_p{int(q * 100)}": round(wpercentile(cum, w, q), 2) for q in (0.1, 0.25, 0.5, 0.75, 0.9)},
+            "val_p50": round(wpercentile(cum_val, w, 0.5), 2),
+            "p_sale_day": share(v > 0 for v in sales_out[t]),
+            "p_first_sale": share(f is not None and f <= t for f in first_sale),
         })
-    firsts = sorted(f for f in first_sale if f is not None)
-    median_first = firsts[len(first_sale) // 2] if len(firsts) > len(first_sale) // 2 else None
+    median_first = next((t for t, d in enumerate(out_days) if d["p_first_sale"] >= 0.5), None)
+    quality_post = sum(wi * e for wi, e in zip(w, effs)) / wsum_sims / (sum(effs) / len(effs))   # 1 = comme la moyenne Awin
     return {"days": out_days, "first_sale_median": days[median_first].isoformat() if median_first is not None else None,
+            "quality_post": quality_post,
             "conv_per_click": conv_per_click, "per_sale_eur": per_sale_eur, "approval_avg": approval_avg,
             "epc_eur": sum(mix[m] * sale[m][0] * sale[m][1] for m in mix)}
 
@@ -367,11 +396,20 @@ def main():
         cur = (k.get("currency") or "EUR").upper()
         sale[m] = per_sale({**DEFAULT_KPI, **{x: v for x, v in k.items() if v is not None}}, rates.get(cur, 1.0))
         approval[m] = float(k.get("approval_pct") or DEFAULT_KPI["approval_pct"])
+    conv = sb("GET", f"conversions?select=transaction_date,commission,status&transaction_date=gte.{since}&limit=5000") or []
+    # Apprentissage : ventes attendues des clics passés (s'ils achetaient comme la moyenne Awin) vs ventes observées
+    exposure = 0.0
+    for mk, days_ in clicks_by_merchant.items():
+        mid = mid_of.get(mk)
+        conv_m = sale[mid][0] if mid in sale else DEFAULT_KPI["conversion_rate"] / 100
+        for d in days_:
+            age = (today - date.fromisoformat(d)).days
+            exposure += conv_m * min(1.0, sum(LAG[:age + 1]))
+    observed_sales = sum(1 for c in conv if c.get("status") != "declined")
     inputs = {"s0": s0, "growth": growth, "growth_se": growth_se, "clicks14": clicks14, "sessions14": sessions14,
-              "mix": mix, "sale": sale, "approval": approval, "pending": pending}
+              "mix": mix, "sale": sale, "approval": approval, "pending": pending, "observed": (exposure, observed_sales)}
     t0 = time.monotonic()
     res = simulate(inputs, today - timedelta(days=1), sims=args.sims)   # premier jour prévu : aujourd'hui
-    conv = sb("GET", f"conversions?select=transaction_date,commission,status&transaction_date=gte.{since}&limit=5000") or []
     actual = defaultdict(float)
     for c in conv:
         if c.get("status") != "declined":
@@ -389,6 +427,7 @@ def main():
             "epc_eur": round(res["epc_eur"], 3), "per_sale_eur": round(res["per_sale_eur"], 2),
             "approval_avg": round(res["approval_avg"], 3), "kpi_known": len(known), "merchants": len(mix),
             "pending_clicks": len(pending), "lag_same_day": LAG[0],
+            "observed_exposure": round(exposure, 2), "observed_sales": observed_sales, "quality_post": round(res["quality_post"], 2),
             "stall_p": STALL_P, "quality_sigma": QUALITY_SIGMA, "tracking": list(TRACKING), "growth_min": GROWTH_MIN,
             "top_merchants": [{"name": names[m] or str(m), "share": round(mix[m], 3), "conv_pct": round(sale[m][0] * 100, 2),
                                "per_sale_eur": round(sale[m][1], 2), "approval": approval[m]}
