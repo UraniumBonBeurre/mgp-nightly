@@ -485,7 +485,10 @@ def write_sitemaps() -> dict[str, int]:
     for view in SITEMAP_VIEWS:
         base = f"{SITE}/{view}"
         urls = [(base, now, "1.0"), (f"{base}/bons-plans", now, "0.9"), (f"{base}/prix", now, "0.6"),
-                (f"{base}/baisses-de-prix", now, "0.9"), (f"{base}/codes-promo", now, "0.8")]
+                (f"{base}/baisses-de-prix", now, "0.9"), (f"{base}/codes-promo", now, "0.8"),
+                (f"{base}/bons-plans-etranger", now, "0.5")]                      # pages du Worker (22/11)
+        if now < "2026-12-02":
+            urls.append((f"{base}/black-friday", now, "0.9"))
         for r in tp._sb("POST", "rpc/rayon_counts", {"p_market": view}) or []:
             if (r.get("compared") or 0) > 0 and r["slug"] != "autres":
                 urls.append((f"{base}/rayon/{r['slug']}", now, "0.8"))
