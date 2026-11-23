@@ -98,14 +98,17 @@ def changes(old: list[dict], new: list[dict]) -> list[tuple[str, str, str]]:
     return out
 
 
-def map_rayons(mid: int, name: str, groups: list[dict], use_gemini: bool) -> dict[str, dict]:
-    """Rayon du site → groupe de commission de la boutique."""
+def map_rayons(mid: int, name: str, groups: list[dict], use_gemini: bool) -> tuple[dict[str, dict], bool]:
+    """Rayon du site → groupe de commission de la boutique ; second élément : correspondance définitive (un seul taux,
+    ou choisie par Gemini). Sans Gemini, taux par défaut partout, refait au relevé suivant."""
     pg = product_groups(groups)
     if not pg:
-        return {}
-    if len({label(g) for g in pg}) == 1 or not use_gemini:
-        d = default_group(groups)
-        return {r: d for r in RAYONS}
+        return {}, True
+    d = default_group(groups)
+    if len({label(g) for g in pg}) == 1:
+        return {r: d for r in RAYONS}, True
+    if not use_gemini:
+        return {r: d for r in RAYONS}, False
     codes = [g["group_code"] for g in pg]
     listing = "\n".join(f"{g['group_code']}\t{g['group_name']}" for g in pg)
     items = "\n".join(f"{i}\t{desc}" for i, desc in enumerate(RAYONS.values()))
@@ -115,8 +118,7 @@ def map_rayons(mid: int, name: str, groups: list[dict], use_gemini: bool) -> dic
               f"default/other group.\n{items}")
     picked = ask_gemini(prompt, codes)
     by_code = {g["group_code"]: g for g in pg}
-    d = default_group(groups)
-    return {r: by_code.get(picked.get(i), d) for i, r in enumerate(RAYONS)}
+    return {r: by_code.get(picked.get(i), d) for i, r in enumerate(RAYONS)}, True
 
 
 def telegram(text: str):
@@ -166,12 +168,13 @@ def main():
         if all(sigs.get((mid, r)) == sig for r in RAYONS):
             continue                                          # mêmes groupes : correspondance des rayons inchangée
         try:
-            mapping = map_rayons(mid, names[mid], groups, use_gemini)
-        except RuntimeError as e:
-            print(f"  {names[mid]} : rayons non associés ({str(e)[:80]})")
-            continue
+            mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
+        except RuntimeError as e:                             # quota Gemini : taux par défaut, Gemini au relevé suivant
+            print(f"  Gemini indisponible ({str(e)[:80]}) : taux par défaut pour les rayons des boutiques suivantes")
+            use_gemini = False
+            mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
         rows = [{"awin_mid": mid, "rayon": r, "group_code": g["group_code"] if g else None, "pct": g["pct"] if g else None,
-                 "signature": sig} for r, g in mapping.items()]
+                 "signature": sig if exact else ""} for r, g in mapping.items()]
         if rows:
             sb("POST", "merchant_rayon_rates?on_conflict=awin_mid,rayon", rows)
             n_mapped += 1
