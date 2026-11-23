@@ -43,6 +43,12 @@ SIMS = 2000
 LAG = [0.60, 0.15] + [0.25 / 28] * 28          # jours entre le clic et l'achat (cookie de 30 jours)
 PRIOR_WEIGHT = 20                               # poids (en clics) de l'a priori « offres du catalogue »
 GROWTH_MAX = 0.30                               # croissance quotidienne initiale au plus (≈ ×1,35 par jour)
+# Incertitude sur les hypothèses elles-mêmes (23/11 : la fourchette ne mesurait que le hasard des ventes) :
+GROWTH_MIN = -0.03                              # le trafic peut aussi baisser (Google qui n'indexe plus, IA qui ne cite plus)
+STALL_P, STALL_TAU = 0.25, (2.0, 6.0)           # 1 chance sur 4 : la croissance s'arrête en quelques jours
+QUALITY_SIGMA = 0.8                             # conversion de NOS visiteurs vs moyenne Awin : ×0,27 à ×3,7 (90 %)
+TRACKING = (0.75, 0.95)                         # part des ventes attribuées (bloqueurs, Safari, cookies refusés)
+TRACKING_MID = sum(TRACKING) / 2
 TAU_MEDIAN, TAU_SIGMA = 14.0, 0.5               # constante d'amortissement de la croissance (jours)
 SESSIONS_CAP = 5_000                            # visites par jour au plus
 SALE_SIGMA = 1.0                                # dispersion de la commission d'une vente (log-normale)
@@ -189,14 +195,15 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
         for k, p in enumerate(LAG):
             if t + k < horizon:
                 c_lam[t + k] += c_sess[t] * ctr_mean * conv_per_click * p
-    c_sales = [c_lam[t] * seas[t] + pend[t] for t in range(horizon)]
+    c_sales = [(c_lam[t] * seas[t] + pend[t]) * TRACKING_MID for t in range(horizon)]
     daily = [[0.0] * sims for _ in range(horizon)]
     validated = [[0.0] * sims for _ in range(horizon)]
     sales_out = [[0] * sims for _ in range(horizon)]
     first_sale = []
     for s in range(sims):
-        g0 = min(GROWTH_MAX, max(0.0, rng.gauss(inputs["growth"], inputs["growth_se"])))
-        tau = rng.lognormvariate(math.log(TAU_MEDIAN), TAU_SIGMA)
+        g0 = min(GROWTH_MAX, max(GROWTH_MIN, rng.gauss(inputs["growth"], inputs["growth_se"])))
+        tau = rng.uniform(*STALL_TAU) if rng.random() < STALL_P else rng.lognormvariate(math.log(TAU_MEDIAN), TAU_SIGMA)
+        eff = rng.lognormvariate(0.0, QUALITY_SIGMA) * rng.uniform(*TRACKING)   # qualité du trafic × ventes attribuées
         ctr = rng.betavariate(1 + inputs["clicks14"], 1 + max(0, inputs["sessions14"] - inputs["clicks14"]))
         sess = sessions_path(inputs["s0"], g0, tau, horizon)
         lam_conv = [0.0] * (horizon + len(LAG))
@@ -205,8 +212,8 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             c = poisson(sess[t] * ctr, rng)
             for k, p in enumerate(LAG):                          # achats répartis sur les jours suivant le clic
                 if t + k < horizon:
-                    lam_conv[t + k] += c * conv_per_click * p
-            n = poisson(lam_conv[t] * seas[t] + pend[t], rng)
+                    lam_conv[t + k] += c * conv_per_click * eff * p
+            n = poisson(lam_conv[t] * seas[t] + pend[t] * eff, rng)
             sales_out[t][s] = n
             tot = val = 0.0
             for _ in range(n):
@@ -233,7 +240,8 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             "sessions": round(c_sess[t], 1), "clicks": round(c_sess[t] * ctr_mean, 1),       # scénario central
             "sales": round(c_sales[t], 3), "revenue": round(c_sales[t] * per_sale_eur, 2),
             "validated": round(c_sales[t] * per_sale_eur * approval_avg, 2), "cum": round(c_cum, 2),
-            "cum_p10": round(percentile(csorted, 0.1), 2), "cum_p50": round(percentile(csorted, 0.5), 2),
+            "cum_p10": round(percentile(csorted, 0.1), 2), "cum_p25": round(percentile(csorted, 0.25), 2),
+            "cum_p50": round(percentile(csorted, 0.5), 2), "cum_p75": round(percentile(csorted, 0.75), 2),
             "cum_p90": round(percentile(csorted, 0.9), 2),
             "val_p50": round(percentile(sorted(cum_val), 0.5), 2),
             "p_sale_day": round(sum(1 for v in sales_out[t] if v) / sims, 3),
@@ -381,6 +389,7 @@ def main():
             "epc_eur": round(res["epc_eur"], 3), "per_sale_eur": round(res["per_sale_eur"], 2),
             "approval_avg": round(res["approval_avg"], 3), "kpi_known": len(known), "merchants": len(mix),
             "pending_clicks": len(pending), "lag_same_day": LAG[0],
+            "stall_p": STALL_P, "quality_sigma": QUALITY_SIGMA, "tracking": list(TRACKING), "growth_min": GROWTH_MIN,
             "top_merchants": [{"name": names[m] or str(m), "share": round(mix[m], 3), "conv_pct": round(sale[m][0] * 100, 2),
                                "per_sale_eur": round(sale[m][1], 2), "approval": approval[m]}
                               for m in sorted(mix, key=lambda m: -mix[m])[:8]],
