@@ -136,7 +136,7 @@ VIEW_LANGS = {"fr": ("fr", "en"), "uk": ("en",), "us": ("en",), "de": ("de",), "
 SOURCE_LANG = {"fr": "fr", "uk": "en", "us": "en", "de": "de", "it": "it", "es": "es"}
 LANG_NAME = {"fr": "French", "en": "English", "de": "German", "it": "Italian", "es": "Spanish"}
 GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
-GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")     # comme scripts/classify_rayons.py
+GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")     # 3.5 d'abord : quota disponible (23/11)
 
 
 def gemini_translate(lang: str, pairs: list[tuple[str, str]]) -> dict[int, tuple[str, str]]:

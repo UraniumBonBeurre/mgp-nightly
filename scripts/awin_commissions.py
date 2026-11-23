@@ -11,7 +11,8 @@ scripts/awin_commissions.py — Taux de commission des boutiques, relus chaque n
 
 Lus par le Worker : commission estimée de chaque clic (tableau de bord, onglet Prévisions).
 
-Usage : python3 scripts/awin_commissions.py [--no-gemini]
+Usage : python3 scripts/awin_commissions.py [--no-gemini] [--map-only]
+  --map-only : rayons associés d'après les taux déjà enregistrés (sans relire Awin)
 """
 
 import argparse
@@ -43,6 +44,7 @@ RAYONS = {
     "mode": "fashion, clothing, shoes", "animaux": "pet supplies", "autres": "other products",
 }
 # Groupes qui ne concernent pas une vente de produit (cartes de fidélité, abonnements, taux nul technique)
+GEMINI_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")   # 3.5 : quota disponible (23/11)
 NOT_PRODUCT = ("CARTE", "RENOUVEL", "FIX", "NO_RATE", "ABONNEMENT", "SUBSCRIPTION", "NEWSLETTER", "LEAD")
 
 
@@ -116,7 +118,7 @@ def map_rayons(mid: int, name: str, groups: list[dict], use_gemini: bool) -> tup
               f"groups (code<TAB>name):\n{listing}\n\nFor each product department below (id<TAB>description), choose the "
               f"code of the commission group that applies to such products sold by this shop. If none fits, choose the "
               f"default/other group.\n{items}")
-    picked = ask_gemini(prompt, codes)
+    picked = ask_gemini(prompt, codes, models=GEMINI_MODELS)
     by_code = {g["group_code"]: g for g in pg}
     return {r: by_code.get(picked.get(i), d) for i, r in enumerate(RAYONS)}, True
 
@@ -135,6 +137,7 @@ def telegram(text: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-gemini", action="store_true")
+    ap.add_argument("--map-only", action="store_true")
     args = ap.parse_args()
     use_gemini = not args.no_gemini and bool(os.environ.get("GOOGLE_AI_API_KEY"))
     feeds = sb("GET", "feeds?select=awin_mid,merchant_name") or []
@@ -149,6 +152,17 @@ def main():
     sigs = {(r["awin_mid"], r["rayon"]): r["signature"] for r in sb("GET", "merchant_rayon_rates?select=awin_mid,rayon,signature&limit=20000") or []}
     alerts, n_groups, n_mapped, failed = [], 0, 0, 0
     for mid in sorted(names):
+        if args.map_only:
+            groups = [{k: g[k] for k in ("awin_mid", "group_code", "group_name", "kind", "pct", "amount", "currency")} for g in old.get(mid, [])]
+            groups = [{**g, "pct": float(g["pct"]) if g["pct"] is not None else None} for g in groups]
+            sig = signature(groups)
+            if not groups or all(sigs.get((mid, r)) == sig for r in RAYONS):
+                continue
+            mapping, exact = map_rayons(mid, names[mid], groups, use_gemini)
+            sb("POST", "merchant_rayon_rates?on_conflict=awin_mid,rayon", [{"awin_mid": mid, "rayon": r, "group_code": g["group_code"] if g else None,
+               "pct": g["pct"] if g else None, "signature": sig if exact else ""} for r, g in mapping.items()])
+            n_mapped += 1
+            continue
         try:
             groups = to_groups(mid, awin(f"/publishers/{AWIN_PUBLISHER_ID}/commissiongroups?advertiserId={mid}"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
