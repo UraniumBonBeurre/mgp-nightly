@@ -109,24 +109,106 @@ def foreign_deals(products: dict, slugs: dict, ships: dict, rates: dict, today: 
             drop = r.get("drop_pct") or 0
             pct, old = (disc, r["old_price"]) if disc >= drop else (drop, r.get("prev_price"))
             if FOREIGN_MIN_PCT <= pct <= 80 and old:
-                cands.append((pct, src, key, slug, r, best["a"], old))
+                cands.append((pct, src, key, slug, r, best["a"], old, prod["doc"]["o"]))
     cands.sort(key=lambda c: (-c[0], c[1], c[2]))
     out = {}
     for target, cur in MARKET_CURRENCY.items():
         items, per_shop = [], defaultdict(int)
-        for pct, src, key, slug, r, mid, old in cands:
+        for pct, src, key, slug, r, mid, old, offers in cands:
             src_cur = MARKET_CURRENCY.get(src)
             if not src_cur or src_cur == cur or not ships_to(ships.get(mid), target) or per_shop[r["best_merchant"]] >= FOREIGN_PER_SHOP:
                 continue
             per_shop[r["best_merchant"]] += 1
             items.append({"s": src, "k": key, "u": slug, "t": r["title"], "b": r.get("brand"), "i": r["image_url"],
                           "m": r["best_merchant"], "p": r["min_price"], "op": old, "c": src_cur, "pct": pct,
-                          "x": convert(r["min_price"], src_cur, cur, rates), "xo": convert(old, src_cur, cur, rates)})
+                          "x": convert(r["min_price"], src_cur, cur, rates), "xo": convert(old, src_cur, cur, rates),
+                          # boutiques de la fiche qui livrent ce pays (fiche traduite du Worker : les autres sont masquées)
+                          "ok": sorted({o["a"] for o in offers if o["c"] == "new" and ships_to(ships.get(o["a"]), target)})})
             if len(items) == FOREIGN_MAX:
                 break
         if items:
             out[target] = {"date": today, "currency": cur, "rates": rates, "items": items}
     return out
+
+
+# Fiche d'un bon plan de l'étranger traduite dans la langue de chaque vue du marché (Worker, foreignProduct)
+VIEW_LANGS = {"fr": ("fr", "en"), "uk": ("en",), "us": ("en",), "de": ("de",), "it": ("it",), "es": ("es",)}
+SOURCE_LANG = {"fr": "fr", "uk": "en", "us": "en", "de": "de", "it": "it", "es": "es"}
+LANG_NAME = {"fr": "French", "en": "English", "de": "German", "it": "Italian", "es": "Spanish"}
+GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+GEMINI_MODELS = ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")     # comme scripts/classify_rayons.py
+
+
+def gemini_translate(lang: str, pairs: list[tuple[str, str]]) -> dict[int, tuple[str, str]]:
+    """Titres et descriptions de produits traduits par Gemini Flash Lite (offre gratuite) → {i: (titre, description)}."""
+    key = os.environ.get("GOOGLE_AI_API_KEY")
+    if not key:
+        raise RuntimeError("GOOGLE_AI_API_KEY absent")
+    lines = "\n".join(json.dumps({"i": i, "t": t, "d": d}, ensure_ascii=False) for i, (t, d) in enumerate(pairs))
+    prompt = (f"Translate these product listings (English, German, French, Italian or Spanish) into {LANG_NAME[lang]}. "
+              f"Always translate every descriptive word (product type, features, colours, 'with', 'battery'...); keep only "
+              f"brand names, model names and numbers, sizes and units unchanged. Return one object per input with the same "
+              f"i, t = translated title, d = translated description (empty string if the input has none).\n{lines}")
+    body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {
+        "responseMimeType": "application/json", "temperature": 0,
+        "responseSchema": {"type": "ARRAY", "items": {"type": "OBJECT", "required": ["i", "t", "d"], "properties": {
+            "i": {"type": "INTEGER"}, "t": {"type": "STRING"}, "d": {"type": "STRING"}}}}}}
+    last = None
+    for attempt in range(4):
+        model = GEMINI_MODELS[min(attempt // 2, len(GEMINI_MODELS) - 1)]
+        req = urllib.request.Request(GEMINI_API.format(model), data=json.dumps(body).encode(), method="POST",
+                                     headers={"x-goog-api-key": key, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                out = json.loads(json.loads(r.read())["candidates"][0]["content"]["parts"][0]["text"])
+            return {o["i"]: (o["t"].strip(), o["d"].strip()) for o in out if isinstance(o.get("i"), int) and o.get("t")}
+        except Exception as e:  # noqa: BLE001 — quota, surcharge, réponse tronquée : on réessaie puis on abandonne
+            last = str(e)[:100]
+            time.sleep(10 * (attempt + 1))
+    raise RuntimeError(f"Gemini indisponible ({last})")
+
+
+def translate_foreign(fd: dict, products: dict, prev: dict, ask=gemini_translate, budget_s: float = 480, pause_s: float = 4.5) -> int:
+    """Ajoute aux bons plans de l'étranger leur titre (tt) et leur description (dd) dans la langue de chaque vue du
+    marché. Traductions de la veille reprises si le titre d'origine n'a pas changé ; durée limitée (le reste garde le
+    texte d'origine, traduit la nuit suivante). Retourne le nombre de traductions demandées."""
+    start, pending = time.time(), defaultdict(list)       # (langue, marché d'origine, produit) → objets à compléter
+    for m, data in fd.items():
+        old = {(i["s"], i["k"]): i for i in (prev.get(m) or {}).get("items", [])}
+        for it in data["items"]:
+            o = old.get((it["s"], it["k"]))
+            for lang in VIEW_LANGS.get(m, ()):
+                if lang == SOURCE_LANG.get(it["s"]):
+                    continue
+                if o and o.get("t") == it["t"] and lang in (o.get("tt") or {}):
+                    it.setdefault("tt", {})[lang] = o["tt"][lang]
+                    if lang in (o.get("dd") or {}):
+                        it.setdefault("dd", {})[lang] = o["dd"][lang]
+                else:
+                    pending[(lang, it["s"], it["k"])].append(it)
+    asked, by_lang = 0, defaultdict(list)
+    for (lang, src, key), its in pending.items():
+        by_lang[lang].append((src, key, its))
+    for lang, rows in by_lang.items():
+        for b in range(0, len(rows), 20):
+            if time.time() - start > budget_s:
+                return asked
+            batch = rows[b:b + 20]
+            pairs = [(its[0]["t"], ((products.get(src, {}).get(key, {}).get("doc") or {}).get("d") or "")[:800]) for src, key, its in batch]
+            try:
+                res = ask(lang, pairs)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ⚠ traduction ({lang}) interrompue : {str(e)[:120]}")
+                return asked
+            asked += len(batch)
+            for i, (_, _, its) in enumerate(batch):
+                if i in res:
+                    for it in its:
+                        it.setdefault("tt", {})[lang] = res[i][0]
+                        if res[i][1]:
+                            it.setdefault("dd", {})[lang] = res[i][1]
+            time.sleep(pause_s)                                   # 15 requêtes par minute au plus (offre gratuite)
+    return asked
 
 
 def shard_of(key: str) -> str:
@@ -825,6 +907,8 @@ def main():
         if rates:
             slugs.update({(r["market"], r["ean"]): r["slug"] for r in rows})
             fd = foreign_deals(products, slugs, ships, rates, today)
+            prev = {m: r2_get_json(f"foreign/{m}.json.gz") or {} for m in MARKET_CURRENCY}
+            print(f"Bons plans de l'étranger : {translate_foreign(fd, products, prev)} traductions demandées à Gemini")
             for m in MARKET_CURRENCY:
                 r2_put_json(f"foreign/{m}.json.gz", fd.get(m, {"date": today, "items": []}), cache_seconds=0)
             print(f"Bons plans de l'étranger (R2) : { {m: len(v['items']) for m, v in fd.items()} }")

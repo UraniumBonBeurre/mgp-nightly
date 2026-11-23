@@ -72,6 +72,7 @@ jobs:
         run: python3 catalog_sync.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
           AWIN_PRODUCTDATA_KEY: ${{ secrets.AWIN_PRODUCTDATA_KEY }}
+          GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}          # traduction des bons plans de l'étranger
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
