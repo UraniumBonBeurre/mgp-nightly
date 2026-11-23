@@ -3,7 +3,7 @@
 scripts/forecast.py — Prévision des revenus d'affiliation, jour par jour (Monte-Carlo)
 ======================================================================================
 
-Chaque nuit (après la synchronisation des ventes Awin), simule SIMS trajectoires des HORIZON prochains jours :
+Chaque nuit (après la synchronisation des ventes Awin), simule SIMS trajectoires des HORIZON prochains jours (6 mois) :
 
   visites/jour   = niveau actuel × croissance qui ralentit. Taux initial : moyenne pondérée (par la précision)
                    de la pente des visites (10 jours) et de celle des affichages Google (21 jours, plus stable) ;
@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from classify_rayons import sb  # noqa: E402  (charge aussi settings / .env.local)
 from settings import AWIN_API_TOKEN, AWIN_PUBLISHER_ID  # noqa: E402
 
-HORIZON = 90
+HORIZON = 180                                   # 6 mois (24/11 : estimations par jour sur le long terme)
 SIMS = 2000
 LAG = [0.60, 0.15] + [0.25 / 28] * 28          # jours entre le clic et l'achat (cookie de 30 jours)
 PRIOR_WEIGHT = 20                               # poids (en clics) de l'a priori « offres du catalogue »
@@ -268,6 +268,9 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
     daily = [[0.0] * sims for _ in range(horizon)]
     validated = [[0.0] * sims for _ in range(horizon)]
     sales_out = [[0] * sims for _ in range(horizon)]
+    # Commission attendue chaque jour selon les hypothèses de chaque simulation (sans le hasard des ventes) :
+    # percentiles = estimation par jour des 5 scénarios (courbes lisses, contrairement aux ventes tirées au sort)
+    rate = [[0.0] * sims for _ in range(horizon)]
     first_sale = []
     effs = []
     for s in range(sims):
@@ -284,6 +287,7 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             for k, p in enumerate(LAG):                          # achats répartis sur les jours suivant le clic
                 if t + k < horizon:
                     lam_conv[t + k] += c * conv_per_click * eff * p
+            rate[t][s] = (lam_conv[t] * seas[t] + pend[t] * eff) * per_sale_eur
             n = poisson(lam_conv[t] * seas[t] + pend[t] * eff, rng)
             sales_out[t][s] = n
             tot = val = 0.0
@@ -316,6 +320,7 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             "validated": round(c_sales[t] * per_sale_eur * approval_avg, 2), "cum": round(c_cum, 2),
             **{f"cum_p{int(q * 100)}": round(wpercentile(cum, w, q), 2) for q in (0.1, 0.25, 0.5, 0.75, 0.9)},
             "val_p50": round(wpercentile(cum_val, w, 0.5), 2),
+            **{f"rate_p{int(q * 100)}": round(wpercentile(rate[t], w, q), 2) for q in (0.1, 0.25, 0.5, 0.75, 0.9)},
             "p_sale_day": share(v > 0 for v in sales_out[t]),
             "p_first_sale": share(f is not None and f <= t for f in first_sale),
         })
@@ -512,10 +517,12 @@ def main():
                               for m in sorted(mix, key=lambda m: -mix[m])[:8]],
         },
     }
-    d30, d90 = res["days"][29], res["days"][-1]
+    d30, d90 = res["days"][29], res["days"][89]
     print(f"Prévision : {s0:.1f} visites/j, croissance {growth:+.2f}/j (±{growth_se:.2f}), clic {out['assumptions']['click_rate']:.1%}, "
           f"EPC pondéré {res['epc_eur']:.2f} € ; 30 j : {d30['cum_p50']:.0f} € (P10 {d30['cum_p10']:.0f} – P90 {d30['cum_p90']:.0f}) ; "
           f"90 j : {d90['cum_p50']:.0f} € (P10 {d90['cum_p10']:.0f} – P90 {d90['cum_p90']:.0f}) ; "
+          f"{len(res['days'])} j : {res['days'][-1]['cum_p50']:.0f} € ; par jour dans 6 mois : {res['days'][-1]['rate_p50']:.2f} € "
+          f"(P10 {res['days'][-1]['rate_p10']:.2f} – P90 {res['days'][-1]['rate_p90']:.2f}) ; "
           f"1re vente médiane : {res['first_sale_median']} ; {time.monotonic() - t0:.0f} s")
     if args.dry_run:
         return out
