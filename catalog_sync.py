@@ -54,7 +54,31 @@ CHANGED_ROWS_MAX = 40_000         # lignes existantes modifiées par relevé ; l
 # égales entre les boutiques (select_catalog) : chaque nouveau programme réduit un peu la part des plus grosses.
 CATALOG_MAX = 240_000
 COMPARABLE_MAX = 150_000
-SHOP_MAX = 10_000                 # par boutique et par marché, comparables compris (≈ 4 % du catalogue)
+SHOP_MAX = 25_000                 # par boutique et par marché, comparables compris (≈ 10 % ; 10 000 jusqu'au 25/11 bloquait Darty)
+# Répartition du reste du catalogue (25/11) : chaque boutique garde ses SHOP_FLOOR meilleurs produits (variété des
+# partenaires), puis la place restante va aux produits qui rapportent le plus (product_value), toutes boutiques
+# confondues. Avant : parts égales par boutique et tirage au hasard dans chacune (343 PC portables sur 363 de Rue du
+# Commerce absents, 8 472 paires de chaussettes présentes).
+SHOP_FLOOR = 300
+VAT = 1.2                         # commission calculée sur le prix hors taxes (environ)
+DEFAULT_PCT = 4.0                 # taux inconnu (boutique sans grille de commission lue)
+VALUE_PRICE_CAP = 3000            # au-delà, le prix n'augmente plus la valeur (achats rares)
+# Demande par rayon : recherches et clics observés sur le site (high-tech surtout, 24/11) et prix moyen du rayon.
+RAYON_DEMAND = {
+    **dict.fromkeys(("smartphones", "ordinateurs", "tv-video", "audio", "ecrans", "photo", "gaming", "objets-connectes",
+                     "petit-electromenager", "gros-electromenager", "peripheriques", "composants-pc"), 1.0),
+    **dict.fromkeys(("reseau-stockage", "impression", "beaute-sante", "maison", "sport", "jouets", "bricolage-jardin",
+                     "animaux"), 0.5),
+    **dict.fromkeys(("mode", "bureau-papeterie", "logiciels", "autres"), 0.25),
+}
+# Audience par marché (24/11 : 3 visites sur 4 et la plupart des lectures par ChatGPT sur la vue française).
+MARKET_WEIGHT = {"fr": 1.0, "uk": 0.7, "us": 0.7, "de": 0.7, "it": 0.7, "es": 0.7}
+EXISTING_BONUS = 1.15             # produit déjà dans l'index : gardé à valeur presque égale (pas de va-et-vient)
+# Produit vendu seulement reconditionné (25/11 : 4 500 téléphones et ordinateurs du flux Darty reconditionné
+# invisibles, dont le Galaxy S24) : fiche à part, mention dans le titre (cartes, recherche, Google).
+REFURB_LABEL = {"fr": "reconditionné", "uk": "refurbished", "us": "refurbished", "de": "generalüberholt",
+                "it": "ricondizionato", "es": "reacondicionado"}
+_REFURB_WORD = re.compile(r"reconditionn|refurbish|generalüberholt|ricondizionat|reacondicionad|\boccasion\b", re.IGNORECASE)
 # Pays de livraison (table merchant_ships, scripts/ship_zones.py, 22/11). Une boutique en euros est aussi affichée
 # sur les autres marchés en euros qu'elle livre (A) ; une boutique d'une autre devise qui livre un pays n'entre pas
 # dans ses comparaisons (prix en dollars ou en livres, douane possible) mais dans la page « bons plans livrés
@@ -261,19 +285,6 @@ def row_sig(r: dict) -> int:
     return hash(tuple(round(float(r[c]), 2) if c in SIG_NUM and r.get(c) is not None else r.get(c) for c in SIG_COLS))
 
 
-def fair_cap(sizes: list[int], room: int) -> int:
-    """Plus grand plafond c tel que sum(min(n, c)) <= room : les petites boutiques gardent tout, les grosses
-    sont ramenées au même plafond."""
-    lo, hi = 0, max(sizes, default=0)
-    while lo < hi:
-        mid = (lo + hi + 1) // 2
-        if sum(min(n, mid) for n in sizes) <= room:
-            lo = mid
-        else:
-            hi = mid - 1
-    return lo
-
-
 # Variantes d'un même article dans une boutique (18/11 : teintes « Shade 1/2/4/5 », couleurs, tailles).
 _COLOURS = set("""black white red blue green yellow orange pink purple violet grey gray brown beige navy gold silver
 rose copper bronze cream ivory khaki olive teal turquoise burgundy maroon multicolor multicolour natural clear
@@ -303,9 +314,36 @@ def variant_key(title: str) -> str:
     return " ".join(out)
 
 
+def guess_rayon(row: dict, prev_rayon: str | None, rules: dict, merchant_key: str | None) -> str:
+    """Rayon d'un produit : celui de l'index s'il existe, sinon celui de sa catégorie décidé par Gemini
+    (category_rayons, scripts/classify_categories.py), sinon les mots-clés de la catégorie, sinon le rayon par défaut
+    de la boutique, sinon « autres » (classé ensuite par Gemini, scripts/classify_rayons.py). Pas de règles sur le
+    titre : trop d'erreurs (« Coquelicot » → téléphones par « coque », « Video Game Vixen Costume » → TV).
+    Catégorie jugée trop vague par Gemini (« autres ») : pas de mots-clés, le titre décidera (classify_rayons.py)."""
+    by_cat = rules["category"].get(row.get("category") or "")
+    return prev_rayon or (by_cat if by_cat and by_cat != "autres" else None) or \
+        (None if by_cat else rayon_for(row.get("category"), rules["cat"])) or \
+        rules["merchant"].get(merchant_key or "", "autres")
+
+
+def product_value(row: dict, pct: float | None, rayon: str | None, eur: float = 1.0, market: str = "fr") -> float:
+    """Ce que rapporte un produit, pour le classement du catalogue : commission par vente en euros (prix hors taxes ×
+    taux de la boutique pour ce rayon), à la puissance 0,7 (un article cher se vend moins souvent), × demande du
+    rayon, × audience du marché, ÷ 5 sans photo, × 1,3 en bon plan ou en baisse (pages bons plans et baisses de prix)."""
+    price = min((row.get("min_price") or 0) * eur, VALUE_PRICE_CAP)
+    v = (price / VAT * (pct if pct is not None else DEFAULT_PCT) / 100) ** 0.7 * RAYON_DEMAND.get(rayon or "autres", 0.5) \
+        * MARKET_WEIGHT.get(market, 0.7)
+    if not row.get("image_url"):
+        v /= 5
+    if row.get("deal_ok") or row.get("drop_pct"):
+        v *= 1.3
+    return v
+
+
 def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_MAX,
-                   comparable_max: int = COMPARABLE_MAX, shop_max: int = SHOP_MAX) -> tuple[set, int]:
-    """Produits gardés dans le catalogue : (marché, clé), et le plafond par boutique appliqué.
+                   comparable_max: int = COMPARABLE_MAX, shop_max: int = SHOP_MAX,
+                   value: dict | None = None, floor: int = SHOP_FLOOR) -> tuple[set, int]:
+    """Produits gardés dans le catalogue : (marché, clé), et le nombre de produits seuls gardés au-delà du plancher.
 
     products : marché → clé → produit (build_product) ; owner : (marché, clé) → boutique affichée (la moins
     chère) ; existing : produits déjà dans l'index (gardés à valeur égale : pas de va-et-vient).
@@ -314,12 +352,16 @@ def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_
        distincts apparaissaient en dizaines de fiches identiques (Kuishi, 18/11 ; 34 000 lignes en double).
        La variante gardée est la plus comparée, puis la mieux classée.
     1. Comparables (≥ 2 boutiques), les plus comparés d'abord, jusqu'à comparable_max.
-    2. Le reste du budget partagé à parts égales entre boutiques (fair_cap), chacune gardant ses meilleurs
-       produits : photo, bon plan ou baisse, déjà présent, prix ≥ PRICE_FLOOR, puis tirage stable."""
-    def rank(mk):
+    2. Produits d'une seule boutique : les `floor` meilleurs de chaque boutique (variété), puis le reste du budget
+       aux plus rentables toutes boutiques confondues (value : product_value, × EXISTING_BONUS s'il est déjà dans
+       l'index). Sans value (tests) : prix, ÷ 5 sans photo."""
+    def worth(mk):
         r = products[mk[0]][mk[1]]["row"]
-        return (not r.get("image_url"), not (r.get("deal_ok") or r.get("drop_pct")), mk not in existing,
-                (r.get("min_price") or 0) < tp.PRICE_FLOOR, hashlib.sha1(f"{mk[0]}:{mk[1]}".encode()).hexdigest())
+        v = value[mk] if value is not None and mk in value else (r.get("min_price") or 0) / (1 if r.get("image_url") else 5)
+        return v * (EXISTING_BONUS if mk in existing else 1)
+
+    def rank(mk):
+        return (-worth(mk), hashlib.sha1(f"{mk[0]}:{mk[1]}".encode()).hexdigest())
 
     def order(mk):
         return (-(products[mk[0]][mk[1]]["row"].get("merchants_count") or 0), rank(mk))
@@ -353,11 +395,23 @@ def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_
         if per_shop[shop] < shop_max:
             kept.add((m, k))
             per_shop[shop] += 1
-    room = {s: max(0, shop_max - per_shop[s]) for s in groups}
-    cap = fair_cap([min(len(g), room[s]) for s, g in groups.items()], budget - len(kept))
+    rest = []
     for s, g in groups.items():
-        kept.update(sorted(g, key=rank)[:min(cap, room[s])])
-    return kept, cap
+        g.sort(key=rank)
+        n = min(floor, len(g), max(0, shop_max - per_shop[s]), max(0, budget - len(kept)))
+        kept.update(g[:n])
+        per_shop[s] += n
+        rest.extend((rank(mk), s, mk) for mk in g[n:])
+    rest.sort(key=lambda t: t[0])
+    extra = 0
+    for _, s, mk in rest:
+        if len(kept) >= budget:
+            break
+        if per_shop[s] < shop_max:
+            kept.add(mk)
+            per_shop[s] += 1
+            extra += 1
+    return kept, extra
 
 
 OUTLIER_RATIO = 3
@@ -407,12 +461,17 @@ def tidy_title(title: str) -> str:
     return title
 
 
-def build_product(key: str, offers: list[dict], today: str) -> dict | None:
-    """Agrège les offres actives d'un produit : fiche (R2) et ligne d'index (Supabase)."""
+def build_product(key: str, offers: list[dict], today: str, market: str = "fr") -> dict | None:
+    """Agrège les offres actives d'un produit : fiche (R2) et ligne d'index (Supabase).
+    Sans offre neuve, les offres reconditionnées tiennent lieu d'offres (titre suivi de la mention « reconditionné »,
+    ni prix barré ni bon plan : le prix barré d'un reconditionné est celui du neuf)."""
     active = [o for o in offers if o["s"] and not o["x"]]
     # Même boutique, même état, deux flux (gammes qui se recoupent) : une seule offre, la moins chère.
     active = list({(o["m"], o["c"]): o for o in sorted(active, key=lambda o: o["p"], reverse=True)}.values())
     new = sorted((o for o in active if o["c"] == "new"), key=lambda o: (o["p"], o["m"]))
+    refurb_only = not new
+    if refurb_only:
+        new = sorted((o for o in active if o["c"] == "refurbished"), key=lambda o: (o["p"], o["m"]))
     if not new:
         return None
     # Offre aberrante (plus de OUTLIER_RATIO fois la moins chère) : en général un code EAN partagé par deux
@@ -425,9 +484,11 @@ def build_product(key: str, offers: list[dict], today: str) -> dict | None:
     # Titre : le plus complet des offres neuves (à égalité, celui de la moins chère)
     # Offres d'une boutique d'un autre pays (A, « ext ») : leur titre n'est pris qu'à défaut (autre langue).
     title = tidy_title(max(new, key=lambda o: (not o.get("ext"), title_score(o["t"], o["b"]), -o["p"]))["t"] or best["t"] or "")
+    if refurb_only and not _REFURB_WORD.search(title):
+        title = f"{title} ({REFURB_LABEL.get(market, REFURB_LABEL['uk'])})"
     fresh = best["f"] is None or best["f"] >= (datetime.fromisoformat(today) - timedelta(days=STALE_DAYS)).date().isoformat()
     refurb = [o["p"] for o in active if o["c"] == "refurbished"]
-    disc = round(100 * (1 - best["p"] / best["o"])) if best["o"] and best["o"] > best["p"] else None
+    disc = round(100 * (1 - best["p"] / best["o"])) if best["o"] and best["o"] > best["p"] and not refurb_only else None
     row = {
         "ean": key, "title": title, "brand": best["b"], "category": best["cat"], "image_url": best["i"],
         "offers_count": len(new), "merchants_count": len({o["m"] for o in new}),
@@ -780,7 +841,7 @@ def main():
     rules = tp_rules()
     products: dict[str, dict[str, dict]] = defaultdict(dict)
     for (market, key), offs in offers_by_key.items():
-        prod = build_product(key, offs, today)
+        prod = build_product(key, offs, today, market)
         if prod:
             products[market][key] = prod
     total = sum(len(v) for v in products.values())
@@ -790,7 +851,19 @@ def main():
     # Boutique affichée (la moins chère) : la première offre pouvait être une offre retirée d'une autre boutique
     # (PCHUB gardait 3 946 produits seuls pour un plafond de 2 029, le 18/11).
     owner = {(m, k): p["row"]["best_merchant"] for m, prods in products.items() for k, p in prods.items()}
-    kept, cap = select_catalog(products, owner, existing)
+    # Valeur de chaque produit (commission attendue × demande du rayon) : taux de la boutique la moins chère pour le
+    # rayon du produit (merchant_rayon_rates, scripts/awin_commissions.py), prix converti en euros.
+    rates_by_rayon, rates_default = load_rates()
+    eur = {m: 1 / (fx.get(MARKET_CURRENCY[m]) or 1) for m in products} if (fx := ecb_rates()) else {m: 1.0 for m in products}
+    value, rayon_of = {}, {}
+    for m, prods in products.items():
+        for k, p in prods.items():
+            best = next((o for o in offers_by_key[(m, k)] if o["n"] == p["row"]["best_merchant"]), None)
+            prev = existing.get((m, k))
+            rayon = rayon_of[(m, k)] = guess_rayon(p["row"], prev["rayon"] if prev else None, rules, best["m"] if best else None)
+            mid = best["a"] if best else None
+            value[(m, k)] = product_value(p["row"], rates_by_rayon.get((mid, rayon), rates_default.get(mid)), rayon, eur[m], m)
+    kept, extra = select_catalog(products, owner, existing, value=value)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
     n_old = sum(1 for mk in dropped if mk in existing)
     dropped = spare_removals(dropped, existing, products, args.new_max)
@@ -798,8 +871,12 @@ def main():
         print(f"Retraits de l'index plafonnés : {args.new_max} sur {n_old} (le reste aux prochains relevés)")
     for m, k in dropped:
         del products[m][k]
-    print(f"Catalogue : {len(kept)} produits gardés sur {total} (au plus {cap} par boutique hors comparables) ; "
-          f"{sum(1 for mk in dropped if mk in existing)} retirés de l'index")
+    by_rayon = defaultdict(int)
+    for mk in kept:
+        by_rayon[rayon_of[mk]] += 1
+    print(f"Catalogue : {len(kept)} produits gardés sur {total} ({SHOP_FLOOR} par boutique au moins, puis {extra} "
+          f"choisis par valeur) ; {sum(1 for mk in dropped if mk in existing)} retirés de l'index ; "
+          f"par rayon : {dict(sorted(by_rayon.items(), key=lambda x: -x[1]))}")
 
     # Index Supabase : produits nouveaux ou modifiés, et produits disparus (remis à zéro).
     rows = []
@@ -812,16 +889,7 @@ def main():
                 continue
             row = {**prod["row"], "market": market, "updated_at": run_start}
             row["slug"] = prev["slug"] if prev else slugify_title(row["title"])
-            # Catégorie de la boutique → rayon par défaut de la boutique → « autres » (classé ensuite par
-            # Gemini Decision, scripts/classify_rayons.py). Pas de règles sur le titre : trop d'erreurs
-            # (« Coquelicot » → téléphones par « coque », « Video Game Vixen Costume » → TV).
-            # Rayon de la catégorie décidé par Gemini (category_rayons, scripts/classify_categories.py) d'abord ;
-            # catégorie jugée trop vague (« autres ») : pas de mots-clés, le titre décidera (classify_rayons.py).
-            by_cat = rules["category"].get(row["category"] or "")
-            row["rayon"] = (prev["rayon"] if prev and prev["rayon"] else None) or \
-                (by_cat if by_cat and by_cat != "autres" else None) or \
-                (None if by_cat else rayon_for(row["category"], rules["cat"])) or \
-                rules["merchant"].get(next(o["m"] for o in offers_by_key[(market, key)] if o["n"] == row["best_merchant"]), "autres")
+            row["rayon"] = rayon_of[(market, key)]           # guess_rayon, calculé pour la sélection
             rows.append(row)
     dirty_shards = defaultdict(set)
     for market, key in touched:
@@ -932,6 +1000,20 @@ def load_ships() -> dict[int, set]:
 
 
 ecb_rates = tp.ecb_rates          # cours BCE (track_prices : sans boto3, aussi utilisé par scripts/forecast.py)
+
+
+def load_rates() -> tuple[dict, dict]:
+    """Taux de commission (%) par (boutique Awin, rayon) et taux par défaut de chaque boutique (groupe DEFAULT)."""
+    by_rayon, default = {}, {}
+    for offset in range(0, 100_000, 1000):
+        page = tp._sb("GET", f"merchant_rayon_rates?select=awin_mid,rayon,pct&order=awin_mid,rayon&limit=1000&offset={offset}")
+        by_rayon.update({(r["awin_mid"], r["rayon"]): float(r["pct"]) for r in page if r["pct"] is not None})
+        if len(page) < 1000:
+            break
+    for r in tp._sb("GET", "merchant_commissions?select=awin_mid,pct&group_code=eq.DEFAULT&kind=eq.percentage&limit=5000"):
+        if r["pct"] is not None:
+            default[r["awin_mid"]] = float(r["pct"])
+    return by_rayon, default
 
 
 def tp_rules() -> dict:

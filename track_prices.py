@@ -282,15 +282,15 @@ def diff_offers(existing: dict[str, dict], incoming: dict[str, dict]):
 # Sélection d'un flux plafonné, par valeur et non au hasard (mesure du 16/11 : au Royaume-Uni, 154 000
 # produits sont vendus par au moins deux boutiques, que le tirage aléatoire ignorait presque tous).
 OVERLAP_CAP = 150_000      # produits comparables (EAN chez ≥ 2 boutiques) gardés au-delà du plafond
-PRICE_FLOOR = 10           # en devise du flux : en dessous, commission dérisoire → en dernier
+RANK_PRICE_CAP = 1500      # au-delà, un prix plus élevé ne fait plus passer devant (achats rares)
 
 
 def rank_offer(o: dict, prefer: frozenset | set, aw_id: str, keep: frozenset | set = frozenset()) -> tuple:
-    """Ordre de sélection : comparable ou déjà retenu la veille, vraie remise ≥ 20 %, image, prix ≥ PRICE_FLOOR,
-    puis tirage stable."""
+    """Ordre de sélection : comparable ou déjà retenu la veille, vraie remise ≥ 20 %, image, puis les plus chers
+    jusqu'à RANK_PRICE_CAP (commission plus forte ; 25/11, avant : tirage au hasard), puis tirage stable."""
     deal = bool(o.get("old_price") and o.get("price") and o["price"] <= o["old_price"] * Decimal("0.8"))
     return (not (o["ean"] in prefer or aw_id in keep), not deal, not o.get("image_url"),
-            (o.get("price") or 0) < PRICE_FLOOR, hashlib.sha1(aw_id.encode()).hexdigest())
+            -min(o.get("price") or 0, RANK_PRICE_CAP), hashlib.sha1(aw_id.encode()).hexdigest())
 
 
 def select_offers(offers: dict[str, dict], cap: int, prefer: frozenset | set,
