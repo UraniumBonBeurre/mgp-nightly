@@ -54,7 +54,8 @@ MANUAL = {
     # Vérifications complémentaires du 22/11 ; pays explicitement desservis seulement.
     124146: "GB",                   # GamingKit : shipping-policy
     126641: "GB",                   # PCHUB : deliveryinfo
-    17430: "FR IT",                 # getgoods : sélecteur Lieferland ; DE à confirmer
+    17430: "AT DE",                 # getgoods : flux autrichien seul ; 24/11, produits « non disponibles pour commande »
+                                    # en livraison France (test du propriétaire) : retiré des marchés FR et IT
     128503: "IT",                   # Plusshop IT : spedizione
     128403: "IT",                   # Bazta IT : spedizione
     116097: "GB",                   # Bazta UK : delivery
