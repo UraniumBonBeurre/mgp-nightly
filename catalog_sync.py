@@ -72,7 +72,7 @@ DISPLAY_PRICE_CAP = 1200
 # Variété de l'ordre d'affichage (25/11, retours d'utilisateurs simulés : 48 Apple sur 48 en tête des ordinateurs,
 # 20 Samsung d'affilée, que des aspirateurs) : dans un rayon, chaque produit de plus d'une même marque, d'un même modèle
 # (couleurs) ou d'un même sous-rayon vaut un peu moins pour l'ordre.
-BRAND_DECAY, FAMILY_DECAY, SOUS_DECAY, SHOP_DECAY = 0.93, 0.5, 0.985, 0.9
+BRAND_DECAY, FAMILY_DECAY, SOUS_DECAY, SHOP_DECAY = 0.88, 0.5, 0.985, 0.9
 FOREIGN_TITLE_FACTOR = 0.4        # boutique dont la plupart des titres sont dans une autre langue que celle du marché
 JUNK_TITLE_FACTOR = 0.1           # titre technique (« product_1652424798 ») ou d'un seul mot
 EXPENSIVE_RATIO = 2.5             # au-delà de 2,5 × le prix habituel du rayon : recule (racine du rapport)
@@ -149,7 +149,7 @@ def adjust_display(scores: dict, products: dict, keys: dict) -> dict:
 
 def diversify(scores: dict, keys: dict) -> dict:
     """Score d'affichage avec variété : keys[(m, k)] = (rayon, marque, modèle, sous-rayon, boutique). Dans chaque rayon,
-    le i-ème produit d'une même marque (classés par score) est multiplié par BRAND_DECAY**i, d'un même modèle par
+    le i-ème produit d'une même marque (classés par score) est multiplié par BRAND_DECAY**i (0,88), d'un même modèle par
     FAMILY_DECAY**i, d'un même sous-rayon par SOUS_DECAY**i, d'une même boutique par SHOP_DECAY**i."""
     out = dict(scores)
     for idx, decay in ((1, BRAND_DECAY), (2, FAMILY_DECAY), (3, SOUS_DECAY), (4, SHOP_DECAY)):
@@ -1006,7 +1006,8 @@ def main():
             rank_value[(m, k)] = product_value(*args_v, display=True) \
                 * (ACCESSORY_FACTOR if is_accessory(r.get("title"), r.get("category")) else 1.0) \
                 * (FOREIGN_SHOP_FACTOR if best and best.get("ext") else 1.0)
-            div_keys[(m, k)] = (rayon, brand_key(r.get("brand")), variant_key(r.get("title")), prev.get("sous") if prev else None,
+            # modèle : 6 premiers mots sans couleur ni taille (« iPad Air 13 Puce M4 » en Minuit, Mauve, Lumière stellaire…)
+            div_keys[(m, k)] = (rayon, brand_key(r.get("brand")), " ".join(variant_key(r.get("title")).split()[:6]), prev.get("sous") if prev else None,
                                 r.get("best_merchant"))
     rank_value = diversify(adjust_display(rank_value, products, div_keys), div_keys)
     kept, extra = select_catalog(products, owner, existing, value=value)
