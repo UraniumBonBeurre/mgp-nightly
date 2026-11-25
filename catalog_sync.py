@@ -72,7 +72,31 @@ DISPLAY_PRICE_CAP = 1200
 # Variété de l'ordre d'affichage (25/11, retours d'utilisateurs simulés : 48 Apple sur 48 en tête des ordinateurs,
 # 20 Samsung d'affilée, que des aspirateurs) : dans un rayon, chaque produit de plus d'une même marque, d'un même modèle
 # (couleurs) ou d'un même sous-rayon vaut un peu moins pour l'ordre.
-BRAND_DECAY, FAMILY_DECAY, SOUS_DECAY, SHOP_DECAY = 0.93, 0.5, 0.985, 0.96
+BRAND_DECAY, FAMILY_DECAY, SOUS_DECAY, SHOP_DECAY = 0.93, 0.5, 0.985, 0.9
+FOREIGN_TITLE_FACTOR = 0.4        # boutique dont la plupart des titres sont dans une autre langue que celle du marché
+JUNK_TITLE_FACTOR = 0.1           # titre technique (« product_1652424798 ») ou d'un seul mot
+EXPENSIVE_RATIO = 2.5             # au-delà de 2,5 × le prix habituel du rayon : recule (racine du rapport)
+# Mots qui trahissent la langue d'un titre (minuscules, accents gardés) ; uk et us : anglais.
+LANG_MARKERS = {
+    "de": re.compile(r"\b(und|mit|für|fur|der|die|das|schwarz|weiß|weiss|grau|matte|fussmatte|fußmatte|größe|stück|zubehör|herren|damen)\b|[ßäöü]"),
+    "fr": re.compile(r"\b(et|avec|pour|noir|blanc|gris|taille|homme|femme|lot de|coffret)\b|[éèêàç]"),
+    "en": re.compile(r"\b(and|with|for|black|white|grey|gray|size|mens|womens|pack of)\b"),
+    "it": re.compile(r"\b(con|per|nero|bianco|grigio|taglia|uomo|donna|confezione)\b"),
+    "es": re.compile(r"\b(con|para|negro|blanco|talla|hombre|mujer|paquete)\b|ñ"),
+}
+MARKET_LANG_OF = {"fr": "fr", "uk": "en", "us": "en", "de": "de", "it": "it", "es": "es"}
+
+
+def foreign_title(title: str | None, market: str) -> bool:
+    """Titre dans une autre langue que celle du marché : marqueurs d'une autre langue et aucun de la sienne."""
+    t = (title or "").lower()
+    own = MARKET_LANG_OF.get(market, "en")
+    return not LANG_MARKERS[own].search(t) and any(rx.search(t) for lang, rx in LANG_MARKERS.items() if lang != own)
+
+
+def junk_title(title: str | None) -> bool:
+    t = (title or "").strip()
+    return bool(re.fullmatch(r"(product|item|sku|article)[_ -]?\d+", t, re.IGNORECASE)) or len(t.split()) < 2
 ACCESSORY_FACTOR = 0.3            # coque, câble, chargeur… derrière les appareils (sauf recherche d'un accessoire)
 FOREIGN_SHOP_FACTOR = 0.5         # produit vendu seulement par une boutique d'un autre pays (titre dans sa langue)
 # Mots d'accessoire (même liste que la fonction SQL search_is_accessory, sans manettes : produit principal du gaming).
@@ -92,6 +116,35 @@ def is_accessory(title: str | None, category: str | None) -> bool:
     head = " ".join(brand_key(title).split()[:6])
     cat = brand_key(re.sub(r"^.*[/>|]", "", category or ""))
     return bool(_ACCESSORY.search(head) or _ACCESSORY.search(cat) or _ACCESSORY_CAT.search(cat))
+
+
+def adjust_display(scores: dict, products: dict, keys: dict) -> dict:
+    """Ordre d'affichage : boutique dont la plupart des titres (≥ 50 %, 20 produits au moins) sont dans une autre langue
+    que celle du marché (Matten Welt, titres allemands sur le marché français, 25/11), titre technique, prix bien
+    au-dessus du prix habituel du rayon (médiane des produits du rayon) : reculent."""
+    foreign = defaultdict(lambda: [0, 0])
+    prices = defaultdict(list)
+    for (m, k), kv in keys.items():
+        row = products[m][k]["row"]
+        f = foreign[(m, kv[4])]
+        f[0] += foreign_title(row.get("title"), m)
+        f[1] += 1
+        if row.get("min_price"):
+            prices[(m, kv[0])].append(row["min_price"])
+    median = {key: sorted(v)[len(v) // 2] for key, v in prices.items()}
+    out = {}
+    for (m, k), v in scores.items():
+        row, kv = products[m][k]["row"], keys[(m, k)]
+        f = foreign[(m, kv[4])]
+        if f[1] >= 20 and f[0] >= 0.5 * f[1]:
+            v *= FOREIGN_TITLE_FACTOR
+        if junk_title(row.get("title")):
+            v *= JUNK_TITLE_FACTOR
+        ref = median.get((m, kv[0]))
+        if ref and row.get("min_price") and row["min_price"] > EXPENSIVE_RATIO * ref:
+            v *= (EXPENSIVE_RATIO * ref / row["min_price"]) ** 0.5
+        out[(m, k)] = v
+    return out
 
 
 def diversify(scores: dict, keys: dict) -> dict:
@@ -955,7 +1008,7 @@ def main():
                 * (FOREIGN_SHOP_FACTOR if best and best.get("ext") else 1.0)
             div_keys[(m, k)] = (rayon, brand_key(r.get("brand")), variant_key(r.get("title")), prev.get("sous") if prev else None,
                                 r.get("best_merchant"))
-    rank_value = diversify(rank_value, div_keys)
+    rank_value = diversify(adjust_display(rank_value, products, div_keys), div_keys)
     kept, extra = select_catalog(products, owner, existing, value=value)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
     n_old = sum(1 for mk in dropped if mk in existing)
