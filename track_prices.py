@@ -81,9 +81,13 @@ EUR_LANG_MARKET = {"fr": "fr", "de": "de", "it": "it", "es": "es", "en": "fr"}  
 # Plafonds par flux (limite 500 Mo de Supabase). Marché américain prioritaire (demande de l'utilisateur).
 PARTNER_CAP = {"us": 5000, "uk": 5000, "fr": 3000, "de": 3000, "it": 5000, "es": 5000}   # + tous les produits comparables (OVERLAP_CAP)
 ALIEXPRESS_CAP = 3000
-MAX_FEED_AGE_DAYS = 60                       # flux que la boutique n'a pas mis à jour depuis 60 jours : ignoré (revient
+MAX_FEED_AGE_DAYS = 180                      # flux que la boutique n'a pas mis à jour depuis 180 jours : ignoré (revient
                                              # seul s'il est rafraîchi). 21/11 : 160 flux figés depuis mai = 85 749
-                                             # produits (36 % du catalogue), 42 prix changés en 5 jours, 2 comparés
+                                             # produits (36 % du catalogue), 42 prix changés en 5 jours, 2 comparés.
+                                             # 25/11 : 60 → 180 jours (Mason & Madison, programme actif, flux du 9/9 :
+                                             # écarté à tort) ; entre 60 et 180 jours, produits en retrait
+                                             # (catalog_sync.STALE_FEED_FACTOR) et « prix relevé le … » sur la fiche.
+STALE_FEED_DAYS = 60
 DESCRIPTION_MAX = 200
 
 FEED_COLUMNS = (

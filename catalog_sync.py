@@ -176,6 +176,7 @@ RAYON_DEMAND = {
 }
 # Audience par marché (24/11 : 3 visites sur 4 et la plupart des lectures par ChatGPT sur la vue française).
 MARKET_WEIGHT = {"fr": 1.0, "uk": 0.7, "us": 0.7, "de": 0.7, "it": 0.7, "es": 0.7}
+STALE_FEED_FACTOR = 0.5           # flux non mis à jour depuis plus de tp.STALE_FEED_DAYS jours : choisi et classé après
 EXISTING_BONUS = 1.15             # produit déjà dans l'index : gardé à valeur presque égale (pas de va-et-vient)
 # Produit vendu seulement reconditionné (25/11 : 4 500 téléphones et ordinateurs du flux Darty reconditionné
 # invisibles, dont le Galaxy S24) : fiche à part, mention dans le titre (cartes, recherche, Google).
@@ -1016,6 +1017,7 @@ def main():
     demand = load_demand()
     eur = {m: 1 / (fx.get(MARKET_CURRENCY[m]) or 1) for m in products} if (fx := ecb_rates()) else {m: 1.0 for m in products}
     value, rank_value, rayon_of, mid_of, div_keys = {}, {}, {}, {}, {}
+    stale_cut = (datetime.fromisoformat(today) - timedelta(days=tp.STALE_FEED_DAYS)).date().isoformat()
     for m, prods in products.items():
         for k, p in prods.items():
             best = next((o for o in offers_by_key[(m, k)] if o["n"] == p["row"]["best_merchant"]), None)
@@ -1024,9 +1026,10 @@ def main():
             mid = mid_of[(m, k)] = best["a"] if best else None
             args_v = (p["row"], rates_by_rayon.get((mid, rayon), rates_default.get(mid)), rayon, eur[m], m,
                       demand, prev.get("sous") if prev else None, mid)
-            value[(m, k)] = product_value(*args_v)
+            stale = STALE_FEED_FACTOR if best and best.get("f") and best["f"] < stale_cut else 1.0
+            value[(m, k)] = product_value(*args_v) * stale
             r = p["row"]
-            rank_value[(m, k)] = product_value(*args_v, display=True) \
+            rank_value[(m, k)] = product_value(*args_v, display=True) * stale \
                 * (ACCESSORY_FACTOR if is_accessory(r.get("title"), r.get("category")) else 1.0) \
                 * (FOREIGN_SHOP_FACTOR if best and best.get("ext") else 1.0)
             # modèle : 6 premiers mots sans couleur ni taille (« iPad Air 13 Puce M4 » en Minuit, Mauve, Lumière stellaire…)
