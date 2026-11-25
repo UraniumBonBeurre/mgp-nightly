@@ -62,6 +62,10 @@ SHOP_MAX = 25_000                 # par boutique et par marché, comparables com
 # confondues. Avant : parts égales par boutique et tirage au hasard dans chacune (343 PC portables sur 363 de Rue du
 # Commerce absents, 8 472 paires de chaussettes présentes).
 SHOP_FLOOR = 300
+# Plancher par rayon et par marché (25/11) : chaque type de produit reste trouvable (matelas, jouets avant Noël…), même
+# quand la demande mesurée penche vers le high-tech : 20 % des produits candidats du rayon, entre 500 et 2 000 (tous
+# s'il y en a moins), les plus intéressants d'abord. Sans lui, les jouets passaient de 912 à 539 produits en France.
+RAYON_FLOOR_SHARE, RAYON_FLOOR_MIN, RAYON_FLOOR_MAX = 0.2, 500, 2000
 VAT = 1.2                         # commission calculée sur le prix hors taxes (environ)
 DEFAULT_PCT = 4.0                 # taux inconnu (boutique sans grille de commission lue)
 VALUE_PRICE_CAP = 3000            # au-delà, le prix n'augmente plus la valeur (achats rares)
@@ -470,7 +474,7 @@ def rank_mix(value: float, market: str, key: str) -> int:
 
 def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_MAX,
                    comparable_max: int = COMPARABLE_MAX, shop_max: int = SHOP_MAX,
-                   value: dict | None = None, floor: int = SHOP_FLOOR) -> tuple[set, int]:
+                   value: dict | None = None, floor: int = SHOP_FLOOR, rayon_of: dict | None = None) -> tuple[set, int]:
     """Produits gardés dans le catalogue : (marché, clé), et le nombre de produits seuls gardés au-delà du plancher.
 
     products : marché → clé → produit (build_product) ; owner : (marché, clé) → boutique affichée (la moins
@@ -480,8 +484,8 @@ def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_
        distincts apparaissaient en dizaines de fiches identiques (Kuishi, 18/11 ; 34 000 lignes en double).
        La variante gardée est la plus comparée, puis la mieux classée.
     1. Comparables (≥ 2 boutiques), les plus comparés d'abord, jusqu'à comparable_max.
-    2. Produits d'une seule boutique : les `floor` meilleurs de chaque boutique (variété), puis le reste du budget
-       aux plus rentables toutes boutiques confondues (value : product_value, × EXISTING_BONUS s'il est déjà dans
+    2. Produits d'une seule boutique : les `floor` meilleurs de chaque boutique (variété), puis le plancher de chaque
+       rayon (rayon_of, RAYON_FLOOR_*), puis le reste du budget aux plus rentables toutes boutiques confondues (value : product_value, × EXISTING_BONUS s'il est déjà dans
        l'index). Sans value (tests) : prix, ÷ 5 sans photo."""
     def worth(mk):
         r = products[mk[0]][mk[1]]["row"]
@@ -531,6 +535,25 @@ def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_
         per_shop[s] += n
         rest.extend((rank(mk), s, mk) for mk in g[n:])
     rest.sort(key=lambda t: t[0])
+    # Plancher par rayon (rayon_of : (marché, clé) → rayon) : les meilleurs produits de chaque rayon d'abord.
+    if rayon_of:
+        cand, have = defaultdict(int), defaultdict(int)
+        for mk in rayon_of:
+            cand[(mk[0], rayon_of[mk])] += 1
+        for mk in kept:
+            have[(mk[0], rayon_of.get(mk))] += 1
+        need = {key: min(c, max(RAYON_FLOOR_MIN, min(RAYON_FLOOR_MAX, int(RAYON_FLOOR_SHARE * c)))) for key, c in cand.items()}
+        later = []
+        for t in rest:
+            _, s, mk = t
+            key = (mk[0], rayon_of.get(mk))
+            if have[key] < need.get(key, 0) and len(kept) < budget and per_shop[s] < shop_max:
+                kept.add(mk)
+                per_shop[s] += 1
+                have[key] += 1
+            else:
+                later.append(t)
+        rest = later
     extra = 0
     for _, s, mk in rest:
         if len(kept) >= budget:
@@ -1010,7 +1033,7 @@ def main():
             div_keys[(m, k)] = (rayon, brand_key(r.get("brand")), " ".join(variant_key(r.get("title")).split()[:6]), prev.get("sous") if prev else None,
                                 r.get("best_merchant"))
     rank_value = diversify(adjust_display(rank_value, products, div_keys), div_keys)
-    kept, extra = select_catalog(products, owner, existing, value=value)
+    kept, extra = select_catalog(products, owner, existing, value=value, rayon_of=rayon_of)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
     n_old = sum(1 for mk in dropped if mk in existing)
     dropped = spare_removals(dropped, existing, products, args.new_max)
