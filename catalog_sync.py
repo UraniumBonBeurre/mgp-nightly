@@ -862,6 +862,7 @@ def main():
     # Programme fermé, suspendu ou quitté : ses produits sortent tout de suite (un clic ne rapporterait rien).
     # Liste Awin illisible ce soir : aucun tri (mieux vaut garder un marchand que tout retirer).
     active = joined_programmes()
+    link_fixes = defaultdict(int)
     if active:
         closed = sorted({f.merchant_name or f.merchant_key for f in feeds if f.awin_mid not in active})
         feeds = [f for f in feeds if f.awin_mid in active]
@@ -961,11 +962,16 @@ def main():
                 pending_states.append((state_key, state))
             for aw, o in incoming.items():
                 st = state[aw]
+                url = deep_link(o["merchant_url"], active.get(feed.awin_mid, [])) if active else o["merchant_url"]
+                if url != o["merchant_url"]:
+                    link_fixes[feed.merchant_name or feed.merchant_key] += 1
+                if url is None:
+                    continue
                 for m in reach[feed.feed_id]:     # marché du flux, puis marchés en euros livrés (offre « ext »)
                     offers_by_key[(m, o["ean"])].append({
                         "m": feed.merchant_key, "n": feed.merchant_name or feed.merchant_key, "a": feed.awin_mid,
                         "p": st["p"], "o": st["o"], "s": st["s"], "c": st["c"], "h": st["h"], "x": None,
-                        "u": o["merchant_url"], "f": feed.last_imported, "t": o["name"], "b": o["brand"],
+                        "u": url, "f": feed.last_imported, "t": o["name"], "b": o["brand"],
                         "i": o["image_url"], "cat": o["merchant_category"], "d": o["description"],
                         **({"ext": True} if m != feed.market else {}),
                     })
@@ -981,6 +987,8 @@ def main():
             ok = False
     pool.shutdown()
 
+    if link_fixes:
+        print(f"Liens profonds corrigés ou écartés (domaines Awin) : {dict(sorted(link_fixes.items(), key=lambda x: -x[1])[:15])}")
     existing = fetch_existing_index()
     if failed or guarded:
         print(f"Flux en échec : {len(failed)}, anormalement petits : {len(guarded)} ; offres de la veille reprises : "
@@ -1180,19 +1188,49 @@ def load_ships() -> dict[int, set]:
 ecb_rates = tp.ecb_rates          # cours BCE (track_prices : sans boto3, aussi utilisé par scripts/forecast.py)
 
 
-def joined_programmes() -> set[int]:
-    """Programmes Awin rejoints et actifs (API Awin) ; ensemble vide si la liste est illisible."""
+def joined_programmes() -> dict[int, list[str]]:
+    """Programmes Awin rejoints et actifs (API Awin) → domaines autorisés pour les liens profonds ; vide si illisible."""
     if not (AWIN_API_TOKEN and AWIN_PUBLISHER_ID):
-        return set()
+        return {}
     try:
         req = urllib.request.Request(f"https://api.awin.com/publishers/{AWIN_PUBLISHER_ID}/programmes?relationship=joined",
                                      headers={"Authorization": f"Bearer {AWIN_API_TOKEN}"})
         with urllib.request.urlopen(req, timeout=120) as r:
             rows = json.loads(r.read())
-        return {int(p["id"]) for p in rows if (p.get("status") or "").lower() == "active"}
+        return {int(p["id"]): [d["domain"].lower() for d in (p.get("validDomains") or []) if d.get("domain")]
+                for p in rows if (p.get("status") or "").lower() == "active"}
     except Exception as e:  # noqa: BLE001
         print(f"  (programmes Awin illisibles : {str(e)[:120]})")
-        return set()
+        return {}
+
+
+# Liens d'un autre réseau d'affiliation dans un flux Awin (25/11 : Mintion → shareasale.com) : la vente ne serait pas
+# attribuée par Awin, l'offre est écartée.
+OTHER_NETWORKS = re.compile(r"(^|\.)(shareasale\.com|linksynergy\.com|anrdoezrs\.net|jdoqocy\.com|tkqlhce\.com|dpbolvw\.net|"
+                            r"kqzyfj\.com|tradedoubler\.com|impact\.com|sjv\.io|pxf\.io|skimresources\.com|sovrn\.com|"
+                            r"go2cloud\.org|prf\.hn|partnerize\.com|awin1\.com)$")
+
+
+def deep_link(url: str, domains: list[str]) -> str | None:
+    """Lien profond accepté par Awin : domaine dans la liste du programme (sinon Awin envoie le visiteur sur la page
+    d'accueil). Corrigé quand l'écart est sûr : « x.com » / « www.x.com », boutique Shopify (*.myshopify.com, même
+    chemin sur le vrai domaine). None : lien d'un autre réseau, offre écartée."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    host = (parts.hostname or "").lower()
+    if OTHER_NETWORKS.search(host):
+        return None
+    concrete = [d.lstrip("*.") for d in domains if d]
+    # Domaine exact, ou sous-domaine d'une entrée « *.x.com » (règle des domaines autorisés d'Awin)
+    if not concrete or any(host == d.lstrip("*.") or (d.startswith("*.") and host.endswith(d[1:])) for d in domains):
+        return url
+    bare = host.removeprefix("www.")
+    target = next((d for d in concrete if d.removeprefix("www.") == bare), None)
+    if not target and host.endswith(".myshopify.com"):
+        target = next((d for d in domains if not d.startswith("*.") and not d.endswith("myshopify.com")), None)
+    return urllib.parse.urlunsplit(parts._replace(netloc=target)) if target else url
 
 
 def catalog_mix(products: dict, kept: set, owner: dict, rayon_of: dict, value: dict) -> dict:
