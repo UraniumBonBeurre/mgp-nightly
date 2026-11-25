@@ -215,9 +215,21 @@ def percentile(sorted_vals: list[float], q: float) -> float:
     return sorted_vals[i]
 
 
-def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON, seed: int = 7) -> dict:
+def nowcast(avg3: float, today_sessions: int, elapsed: float) -> float:
+    """Visites par jour de départ : moyenne des 3 derniers jours complets, rapprochée du rythme du jour en cours
+    (visites du jour ÷ part de la journée écoulée), d'autant plus que la journée est avancée (poids ≤ 0,5 ; tôt le
+    matin, le rythme du jour ne dit presque rien : le trafic vient surtout le soir)."""
+    if elapsed < 0.1:
+        return avg3
+    w = min(0.5, 0.5 * elapsed)
+    return (1 - w) * avg3 + w * today_sessions / elapsed
+
+
+def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON, seed: int = 7, day0_left: float = 1.0) -> dict:
     """inputs : s0, growth, growth_se, clicks14, sessions14, mix {m: part}, sale {m: (conv, commission €)},
-    approval {m: %}, pending [(jours écoulés depuis le clic, m)]. Renvoie percentiles par jour et cumulés."""
+    approval {m: %}, pending [(jours écoulés depuis le clic, m)]. Renvoie percentiles par jour et cumulés.
+    day0_left : part de la journée en cours qui reste (recalcul toutes les heures) : visites, clics et ventes du
+    premier jour seulement pour les heures restantes (les clics déjà faits aujourd'hui sont dans pending)."""
     rng = random.Random(seed)
     mix, sale = inputs["mix"], inputs["sale"]
     weights = {m: mix[m] * sale[m][0] for m in mix}             # ventes par clic, par boutique
@@ -253,6 +265,8 @@ def simulate(inputs: dict, start: date, sims: int = SIMS, horizon: int = HORIZON
             lag = age + t + 1
             if lag < len(LAG):
                 pend[t] += sale[m][0] * LAG[lag] * seas[t]
+    pend[0] *= day0_left
+    tseas = [f * (day0_left if t == 0 else 1.0) for t, f in enumerate(tseas)]   # visites du jour : heures restantes
     # Scénario central (hypothèses médianes, sans tirage) : prévision jour par jour lisible ; les simulations
     # donnent la fourchette (les rares trajectoires à très fort trafic tirent la moyenne vers le haut).
     per_sale_eur = sum(weights[m] * sale[m][1] for m in ms) / wsum
@@ -394,7 +408,11 @@ def main():
     gsc = sb("GET", f"gsc_daily?select=day,impressions&day=gte.{(today - timedelta(days=24)).isoformat()}&order=day") or []
     g_google = fit_growth([float(r["impressions"] or 0) for r in gsc][-21:])
     growth, growth_se = combine([g_visits, g_google])
-    s0 = sum(r["sessions"] for r in complete[-3:]) / 3
+    now = datetime.now(timezone.utc)
+    elapsed = (now - datetime(now.year, now.month, now.day, tzinfo=timezone.utc)).total_seconds() / 86400
+    today_sessions = next((r["sessions"] for r in series if r["day"] == today.isoformat()), 0)
+    avg3 = sum(r["sessions"] for r in complete[-3:]) / 3
+    s0 = nowcast(avg3, today_sessions, elapsed)                 # rythme du jour pris en compte (recalcul horaire)
     sessions14 = sum(r["sessions"] for r in complete[-14:])
     clicks14 = sum(r["clicks"] for r in complete[-14:])
 
@@ -489,7 +507,7 @@ def main():
     inputs = {"s0": s0, "growth": growth, "growth_se": growth_se, "clicks14": clicks14, "sessions14": sessions14,
               "mix": mix, "sale": sale, "approval": approval, "pending": pending, "observed": (exposure, observed_sales)}
     t0 = time.monotonic()
-    res = simulate(inputs, today - timedelta(days=1), sims=args.sims)   # premier jour prévu : aujourd'hui
+    res = simulate(inputs, today - timedelta(days=1), sims=args.sims, day0_left=1 - elapsed)   # premier jour : aujourd'hui, heures restantes
     actual = defaultdict(float)
     for c in conv:
         if c.get("status") != "declined":
@@ -500,7 +518,7 @@ def main():
         "history": [{**r, "revenue": round(actual.get(r["day"], 0.0), 2)} for r in complete[-30:]],
         "days": res["days"], "first_sale_median": res["first_sale_median"],
         "assumptions": {
-            "sessions_now": round(s0, 1), "growth_per_day": round(growth, 3), "growth_se": round(growth_se, 3),
+            "sessions_now": round(s0, 1), "sessions_avg3": round(avg3, 1), "sessions_today": today_sessions, "day_elapsed": round(elapsed, 2), "growth_per_day": round(growth, 3), "growth_se": round(growth_se, 3),
             "growth_visits": round(g_visits[0], 3), "growth_google": round(g_google[0], 3),
             "tau_median_days": TAU_MEDIAN, "click_rate": round((clicks14 + 1) / (sessions14 + 2), 3),
             "clicks14": clicks14, "sessions14": sessions14, "conv_per_click": round(res["conv_per_click"], 4),

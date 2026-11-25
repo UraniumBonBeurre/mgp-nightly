@@ -1,0 +1,29 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# forecast.yml — Prévision des revenus recalculée chaque heure (scripts/forecast.py, ~10 s)
+#
+# Dépôt public mgp-nightly (minutes illimitées), copié depuis le dépôt privé par sync_jobs.yml : ne pas modifier ici.
+# Lancé chaque heure par le Worker Cloudflare (worker/src/cron.ts), sauf pendant le relevé de nuit (qui la recalcule).
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: "Forecast"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: forecast
+  cancel-in-progress: true
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revenue forecast
+        run: python3 scripts/forecast.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          AWIN_API_TOKEN: ${{ secrets.AWIN_API_TOKEN }}
+          AWIN_PUBLISHER_ID: ${{ secrets.AWIN_PUBLISHER_ID }}
