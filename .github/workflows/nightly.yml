@@ -40,7 +40,7 @@ jobs:
       - name: Check only
         if: inputs.check
         run: |
-          python3 -c "import catalog_sync, track_prices; import sys; sys.path.insert(0, 'scripts'); import awin_sync, awin_promotions, awin_commissions, classify_categories, classify_rayons, ship_zones, forecast"
+          python3 -c "import catalog_sync, track_prices; import sys; sys.path.insert(0, 'scripts'); import awin_sync, awin_promotions, awin_commissions, classify_categories, classify_rayons, ship_zones, forecast, demand"
           for k in NEXT_PUBLIC_SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY AWIN_PRODUCTDATA_KEY AWIN_API_TOKEN AWIN_PUBLISHER_ID R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET_NAME GOOGLE_AI_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
             [ -n "${!k}" ] || { echo "secret manquant : $k"; exit 1; }
           done
@@ -66,12 +66,22 @@ jobs:
           AWIN_API_TOKEN: ${{ secrets.AWIN_API_TOKEN }}
           AWIN_PUBLISHER_ID: ${{ secrets.AWIN_PUBLISHER_ID }}
 
+      # Demande mesurée (recherches, pages vues, clics, ventes, IA, Google) : choix et classement du catalogue
+      - name: Measured demand
+        id: demand
+        if: ${{ always() && !inputs.check }}
+        run: python3 scripts/demand.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
+
       - name: Sync catalogue (all partner feeds)
         id: catalog
         if: ${{ always() && !inputs.check }}
         run: python3 catalog_sync.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
         env:
           AWIN_PRODUCTDATA_KEY: ${{ secrets.AWIN_PRODUCTDATA_KEY }}
+          AWIN_API_TOKEN: ${{ secrets.AWIN_API_TOKEN }}               # programmes rejoints et actifs
+          AWIN_PUBLISHER_ID: ${{ secrets.AWIN_PUBLISHER_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}       # marchands entrés ou sortis
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}          # traduction des bons plans de l'étranger
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -151,6 +161,7 @@ jobs:
         run: |
           f=""
           [ "$S_SHIPS" = failure ] && f="$f, pays de livraison"
+          [ "$S_DEMAND" = failure ] && f="$f, demande mesurée"
           [ "$S_CATS" = failure ] && f="$f, classement des catégories"
           [ "$S_RAYONS" = failure ] && f="$f, classement des produits"
           [ "$S_SOUS" = failure ] && f="$f, sous-rayons"
@@ -169,6 +180,7 @@ jobs:
         env:
           S_CATALOG: ${{ steps.catalog.outcome }}
           S_SHIPS: ${{ steps.ships.outcome }}
+          S_DEMAND: ${{ steps.demand.outcome }}
           S_CATS: ${{ steps.cats.outcome }}
           S_RAYONS: ${{ steps.rayons.outcome }}
           S_SOUS: ${{ steps.sous.outcome }}

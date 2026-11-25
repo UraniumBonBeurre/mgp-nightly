@@ -19,11 +19,13 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import sys
 import time
 import unicodedata
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -32,7 +34,7 @@ import boto3
 from botocore.config import Config
 
 import track_prices as tp
-from settings import R2_ACCESS_KEY_ID, R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_SECRET_ACCESS_KEY
+from settings import AWIN_API_TOKEN, AWIN_PUBLISHER_ID, R2_ACCESS_KEY_ID, R2_ACCOUNT_ID, R2_BUCKET_NAME, R2_SECRET_ACCESS_KEY
 
 SHARD_HEX = 3                     # 16³ = 4 096 fragments par marché
 HISTORY_MAX = 120                 # changements de prix gardés par offre
@@ -63,6 +65,10 @@ SHOP_FLOOR = 300
 VAT = 1.2                         # commission calculée sur le prix hors taxes (environ)
 DEFAULT_PCT = 4.0                 # taux inconnu (boutique sans grille de commission lue)
 VALUE_PRICE_CAP = 3000            # au-delà, le prix n'augmente plus la valeur (achats rares)
+# Ordre d'affichage (rang mix) : prix moins déterminant (plafond 1 500 €, puissance 0,5) et produits vendus par
+# plusieurs boutiques devant (+30 % par boutique) : le 25/11, avec le score de sélection, l'iPhone 18 Pro 2 To à
+# 3 129 € passait avant l'iPhone 17 que les gens cherchent.
+DISPLAY_PRICE_CAP = 1500
 # Demande par rayon : recherches et clics observés sur le site (high-tech surtout, 24/11) et prix moyen du rayon.
 RAYON_DEMAND = {
     **dict.fromkeys(("smartphones", "ordinateurs", "tv-video", "audio", "ecrans", "photo", "gaming", "objets-connectes",
@@ -278,10 +284,12 @@ def update_state(state: dict, incoming: dict, today: str) -> tuple[dict, set]:
 SIG_NUM = ("min_price", "max_price", "old_price", "refurbished_min_price", "prev_price")
 SIG_COLS = ("title", "brand", "category", "image_url", "offers_count", "merchants_count", "best_merchant", "deal_ok",
             "price_changed_at", "drop_pct", "lowest_since") + SIG_NUM
+# Rang d'intérêt (25/11) : comparé à part, une ligne dont seul le rang change passe après les vrais changements.
+RANK_COL = "mix"
 
 
 def row_sig(r: dict) -> int:
-    """Empreinte d'une ligne d'index (prix arrondis au centime : 35.9, « 35.90 » et 35.90 sont égaux)."""
+    """Empreinte d'une ligne d'index (prix arrondis au centime : 35.9, « 35.90 » et 35.90 sont égaux), sans le rang."""
     return hash(tuple(round(float(r[c]), 2) if c in SIG_NUM and r.get(c) is not None else r.get(c) for c in SIG_COLS))
 
 
@@ -326,18 +334,42 @@ def guess_rayon(row: dict, prev_rayon: str | None, rules: dict, merchant_key: st
         rules["merchant"].get(merchant_key or "", "autres")
 
 
-def product_value(row: dict, pct: float | None, rayon: str | None, eur: float = 1.0, market: str = "fr") -> float:
-    """Ce que rapporte un produit, pour le classement du catalogue : commission par vente en euros (prix hors taxes ×
+def brand_key(s: str | None) -> str:
+    """Marque ou recherche normalisée : minuscules, sans accents ni ponctuation (« De'Longhi » → « de longhi »)."""
+    t = unicodedata.normalize("NFKD", (s or "").lower())
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", "".join(c for c in t if not unicodedata.combining(c))).split())
+
+
+def product_value(row: dict, pct: float | None, rayon: str | None, eur: float = 1.0, market: str = "fr",
+                  demand: dict | None = None, sous: str | None = None, mid: int | None = None, display: bool = False) -> float:
+    """Intérêt d'un produit, pour choisir et classer le catalogue : commission par vente en euros (prix hors taxes ×
     taux de la boutique pour ce rayon), à la puissance 0,7 (un article cher se vend moins souvent), × demande du
-    rayon, × audience du marché, ÷ 5 sans photo, × 1,3 en bon plan ou en baisse (pages bons plans et baisses de prix)."""
-    price = min((row.get("min_price") or 0) * eur, VALUE_PRICE_CAP)
-    v = (price / VAT * (pct if pct is not None else DEFAULT_PCT) / 100) ** 0.7 * RAYON_DEMAND.get(rayon or "autres", 0.5) \
-        * MARKET_WEIGHT.get(market, 0.7)
+    rayon, du sous-rayon et de la marque, × fiabilité du marchand, × audience du marché (demand : mesurés chaque nuit
+    par scripts/demand.py ; sans mesure, poids de départ RAYON_DEMAND et MARKET_WEIGHT), ÷ 5 sans photo, × 1,3 en bon
+    plan ou en baisse, + 15 % par boutique de plus qui le vend (jusqu'à 4 : c'est une vraie comparaison).
+    display : variante pour l'ordre d'affichage (DISPLAY_PRICE_CAP, puissance 0,5, + 30 % par boutique)."""
+    d = demand or {}
+    price = min((row.get("min_price") or 0) * eur, DISPLAY_PRICE_CAP if display else VALUE_PRICE_CAP)
+    r = rayon or "autres"
+    w_rayon = d.get("rayon", {}).get(market, {}).get(r, RAYON_DEMAND.get(r, 0.5))
+    w = w_rayon * d.get("market", {}).get(market, MARKET_WEIGHT.get(market, 0.7)) \
+        * d.get("sous", {}).get(market, {}).get(f"{r}/{sous}", 1.0) \
+        * d.get("brand", {}).get(market, {}).get(brand_key(row.get("brand")), 1.0) \
+        * d.get("merchant", {}).get(str(mid), 1.0)
+    v = (price / VAT * (pct if pct is not None else DEFAULT_PCT) / 100) ** (0.5 if display else 0.7) * w
     if not row.get("image_url"):
         v /= 5
     if row.get("deal_ok") or row.get("drop_pct"):
         v *= 1.3
-    return v
+    return v * (1 + (0.3 if display else 0.15) * min(max((row.get("merchants_count") or 1) - 1, 0), 4))
+
+
+def rank_mix(value: float, market: str, key: str) -> int:
+    """Rang d'intérêt écrit dans la colonne mix (plus petit = plus intéressant) : 1 024 paliers de 12 % (20 par
+    décade, un palier ne change que si l'intérêt bouge vraiment : peu de réécritures), puis tirage stable qui mélange
+    les produits d'un même palier (boutiques variées)."""
+    bucket = max(0, min(1023, round(20 * math.log10(max(value, 1e-12)) + 500)))
+    return (1023 - bucket) * 262144 + int(hashlib.sha1(f"{market}:{key}".encode()).hexdigest()[:5], 16) % 262144
 
 
 def select_catalog(products: dict, owner: dict, existing, budget: int = CATALOG_MAX,
@@ -707,6 +739,14 @@ def main():
     history = bootstrap_history() if args.bootstrap else {}
 
     feeds = [f for f in tp.build_perimeter() if args.feed in (None, f.feed_id)]
+    # Programme fermé, suspendu ou quitté : ses produits sortent tout de suite (un clic ne rapporterait rien).
+    # Liste Awin illisible ce soir : aucun tri (mieux vaut garder un marchand que tout retirer).
+    active = joined_programmes()
+    if active:
+        closed = sorted({f.merchant_name or f.merchant_key for f in feeds if f.awin_mid not in active})
+        feeds = [f for f in feeds if f.awin_mid in active]
+        if closed:
+            print(f"Programmes inactifs ou quittés, ignorés : {', '.join(closed[:20])}")
     print(f"Relevé {today} — {len(feeds)} flux")
     offers_by_key: dict[tuple[str, str], list[dict]] = defaultdict(list)
     touched: set[tuple[str, str]] = set()
@@ -854,15 +894,19 @@ def main():
     # Valeur de chaque produit (commission attendue × demande du rayon) : taux de la boutique la moins chère pour le
     # rayon du produit (merchant_rayon_rates, scripts/awin_commissions.py), prix converti en euros.
     rates_by_rayon, rates_default = load_rates()
+    demand = load_demand()
     eur = {m: 1 / (fx.get(MARKET_CURRENCY[m]) or 1) for m in products} if (fx := ecb_rates()) else {m: 1.0 for m in products}
-    value, rayon_of = {}, {}
+    value, rank_value, rayon_of, mid_of = {}, {}, {}, {}
     for m, prods in products.items():
         for k, p in prods.items():
             best = next((o for o in offers_by_key[(m, k)] if o["n"] == p["row"]["best_merchant"]), None)
             prev = existing.get((m, k))
             rayon = rayon_of[(m, k)] = guess_rayon(p["row"], prev["rayon"] if prev else None, rules, best["m"] if best else None)
-            mid = best["a"] if best else None
-            value[(m, k)] = product_value(p["row"], rates_by_rayon.get((mid, rayon), rates_default.get(mid)), rayon, eur[m], m)
+            mid = mid_of[(m, k)] = best["a"] if best else None
+            args_v = (p["row"], rates_by_rayon.get((mid, rayon), rates_default.get(mid)), rayon, eur[m], m,
+                      demand, prev.get("sous") if prev else None, mid)
+            value[(m, k)] = product_value(*args_v)
+            rank_value[(m, k)] = product_value(*args_v, display=True)
     kept, extra = select_catalog(products, owner, existing, value=value)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
     n_old = sum(1 for mk in dropped if mk in existing)
@@ -874,6 +918,7 @@ def main():
     by_rayon = defaultdict(int)
     for mk in kept:
         by_rayon[rayon_of[mk]] += 1
+    mix_summary = catalog_mix(products, kept, owner, rayon_of, value)
     print(f"Catalogue : {len(kept)} produits gardés sur {total} ({SHOP_FLOOR} par boutique au moins, puis {extra} "
           f"choisis par valeur) ; {sum(1 for mk in dropped if mk in existing)} retirés de l'index ; "
           f"par rayon : {dict(sorted(by_rayon.items(), key=lambda x: -x[1]))}")
@@ -885,9 +930,11 @@ def main():
             prev = existing.get((market, key))
             # Écrite seulement si elle diffère de l'index (et non « si le flux a changé ») : un relevé interrompu,
             # un flux en échec ou une nouvelle règle se rattrapent seuls, sans réécriture massive.
-            if prev and prev["sig"] == row_sig(prod["row"]) and not (args.bootstrap or args.reindex or args.full):
+            prod["row"][RANK_COL] = rank_mix(rank_value[(market, key)], market, key)
+            same = prev and prev["sig"] == row_sig(prod["row"])
+            if same and prev.get("mix") == prod["row"][RANK_COL] and not (args.bootstrap or args.reindex or args.full):
                 continue
-            row = {**prod["row"], "market": market, "updated_at": run_start}
+            row = {**prod["row"], "market": market, "updated_at": run_start, "_rank_only": bool(same)}
             row["slug"] = prev["slug"] if prev else slugify_title(row["title"])
             row["rayon"] = rayon_of[(market, key)]           # guess_rayon, calculé pour la sélection
             rows.append(row)
@@ -940,7 +987,8 @@ def main():
     changed = [r for r in rows if (r["market"], r["ean"]) in existing]
     if not args.bootstrap:
         new.sort(key=lambda r: -(r.get("merchants_count") or 0))            # comparables d'abord
-        changed.sort(key=lambda r: (r.get("drop_pct") is None, -(r.get("merchants_count") or 0)))   # baisses d'abord
+        # baisses d'abord, changements du seul rang d'intérêt en dernier (rattrapés les nuits suivantes)
+        changed.sort(key=lambda r: (r["_rank_only"], r.get("drop_pct") is None, -(r.get("merchants_count") or 0)))
         if len(new) > args.new_max or len(changed) > CHANGED_ROWS_MAX:
             print(f"Écritures plafonnées : {min(len(new), args.new_max)} nouveaux sur {len(new)}, "
                   f"{min(len(changed), CHANGED_ROWS_MAX)} modifiés sur {len(changed)} ; le reste aux prochains relevés")
@@ -958,6 +1006,7 @@ def main():
         list(pool.map(lambda s: r2_put_json(*s, cache_seconds=0), pending_states))
     print(f"R2 : {len(pending_states)} états de flux écrits")
     tp._sb("POST", "feeds?on_conflict=feed_id", feeds_rows, prefer="resolution=merge-duplicates,return=minimal")
+    publish_mix(mix_summary, today)
     tp._sb("POST", "rpc/refresh_brand_index", {})
     if os.environ.get("SKIP_STATS_REFRESH") != "1":      # relevé de nuit : une fois à la fin (jobs/nightly.yml)
         tp._sb("POST", "rpc/refresh_site_stats", {})    # compteurs des pages (rayons, comparés, bons plans)
@@ -1002,6 +1051,76 @@ def load_ships() -> dict[int, set]:
 ecb_rates = tp.ecb_rates          # cours BCE (track_prices : sans boto3, aussi utilisé par scripts/forecast.py)
 
 
+def joined_programmes() -> set[int]:
+    """Programmes Awin rejoints et actifs (API Awin) ; ensemble vide si la liste est illisible."""
+    if not (AWIN_API_TOKEN and AWIN_PUBLISHER_ID):
+        return set()
+    try:
+        req = urllib.request.Request(f"https://api.awin.com/publishers/{AWIN_PUBLISHER_ID}/programmes?relationship=joined",
+                                     headers={"Authorization": f"Bearer {AWIN_API_TOKEN}"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            rows = json.loads(r.read())
+        return {int(p["id"]) for p in rows if (p.get("status") or "").lower() == "active"}
+    except Exception as e:  # noqa: BLE001
+        print(f"  (programmes Awin illisibles : {str(e)[:120]})")
+        return set()
+
+
+def catalog_mix(products: dict, kept: set, owner: dict, rayon_of: dict, value: dict) -> dict:
+    """Composition du catalogue gardé, par marché : produits et intérêt par rayon, produits par marchand, marques
+    (≥ 3 produits). Lue par scripts/demand.py (part de chaque marque) et par l'onglet Pilotage du tableau de bord."""
+    out = {"rayon": defaultdict(lambda: defaultdict(int)), "value": defaultdict(lambda: defaultdict(float)),
+           "merchants": defaultdict(lambda: defaultdict(int)), "brand": defaultdict(lambda: defaultdict(int))}
+    for m, k in kept:
+        r = rayon_of[(m, k)]
+        out["rayon"][m][r] += 1
+        out["value"][m][r] += value[(m, k)]
+        out["merchants"][m][owner.get((m, k)) or "?"] += 1
+        if (b := brand_key(products[m][k]["row"].get("brand"))):
+            out["brand"][m][b] += 1
+    res = {key: {m: dict(d) for m, d in v.items()} for key, v in out.items()}
+    res["value"] = {m: {r: round(x, 1) for r, x in d.items()} for m, d in res["value"].items()}
+    res["brand"] = {m: dict(sorted(((b, n) for b, n in d.items() if n >= 3), key=lambda x: -x[1])[:3000]) for m, d in res["brand"].items()}
+    return res
+
+
+def publish_mix(summary: dict, today: str) -> None:
+    """Écrit la composition du catalogue et signale (Telegram) les marchands entrés ou sortis depuis la veille."""
+    try:
+        prev = (tp._sb("GET", "dashboard_cache?select=value&key=eq.catalog_mix") or [{}])[0].get("value") or {}
+    except RuntimeError:
+        prev = {}
+    pm = prev.get("merchants") or {}
+    # Seuil de 20 produits : un petit marchand qui n'est le moins cher nulle part un soir ne fait pas d'alerte.
+    entered = {m: sorted(n for n, c in d.items() if c >= 20 and n not in pm.get(m, {})) for m, d in summary["merchants"].items()} if pm else {}
+    left = {m: sorted(n for n, c in d.items() if c >= 20 and n not in summary["merchants"].get(m, {})) for m, d in pm.items()}
+    summary["changes"] = {"date": today, "entered": {m: v for m, v in entered.items() if v}, "left": {m: v for m, v in left.items() if v}}
+    if prev.get("changes") and prev["changes"].get("date") == today:      # relevé relancé le même jour : on cumule
+        for kind in ("entered", "left"):
+            for m, v in prev["changes"].get(kind, {}).items():
+                summary["changes"][kind][m] = sorted(set(v) | set(summary["changes"][kind].get(m, [])))
+    tp._sb("POST", "dashboard_cache?on_conflict=key", [{"key": "catalog_mix", "value": summary,
+            "updated_at": datetime.now(timezone.utc).isoformat()}], prefer="resolution=merge-duplicates,return=minimal")
+    lines = [f"➕ {m.upper()} : {', '.join(v[:12])}{'…' if len(v) > 12 else ''}" for m, v in summary["changes"]["entered"].items()]
+    lines += [f"➖ {m.upper()} : {', '.join(v[:12])}{'…' if len(v) > 12 else ''}" for m, v in summary["changes"]["left"].items()]
+    tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if lines and tok and chat and pm:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": "🛒 Marchands du catalogue (relevé de la nuit)\n\n" + "\n".join(lines)}).encode()
+        try:
+            urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data=data, timeout=30)
+        except OSError:
+            pass
+
+
+def load_demand() -> dict:
+    """Demande mesurée la veille par scripts/demand.py (dashboard_cache « demand ») ; vide si absente."""
+    try:
+        rows = tp._sb("GET", "dashboard_cache?select=value&key=eq.demand")
+        return (rows[0]["value"] or {}) if rows else {}
+    except RuntimeError:
+        return {}
+
+
 def load_rates() -> tuple[dict, dict]:
     """Taux de commission (%) par (boutique Awin, rayon) et taux par défaut de chaque boutique (groupe DEFAULT)."""
     by_rayon, default = {}, {}
@@ -1035,7 +1154,7 @@ def fetch_existing_index() -> dict[tuple[str, str], dict]:
         while True:
             for attempt in range(4):      # base lente ou en redémarrage : on réessaie plutôt que d'abandonner le relevé
                 try:
-                    rows = tp._sb("GET", f"products_ean?select=market,ean,slug,rayon,{','.join(SIG_COLS)}&market=eq.{market}"
+                    rows = tp._sb("GET", f"products_ean?select=market,ean,slug,rayon,sous_rayon,{RANK_COL},{','.join(SIG_COLS)}&market=eq.{market}"
                                          f"&ean=gt.{last}&order=ean&limit=1000")
                     break
                 except RuntimeError:
@@ -1043,8 +1162,8 @@ def fetch_existing_index() -> dict[tuple[str, str], dict]:
                         raise
                     time.sleep(20 * (attempt + 1))
             for r in rows:     # seule l'empreinte est gardée en mémoire (300 000 lignes)
-                out[(r["market"], r["ean"])] = {"slug": r["slug"], "rayon": r["rayon"], "offers_count": r["offers_count"],
-                                                "sig": row_sig(r)}
+                out[(r["market"], r["ean"])] = {"slug": r["slug"], "rayon": r["rayon"], "sous": r.get("sous_rayon"),
+                                                "offers_count": r["offers_count"], "sig": row_sig(r), "mix": r.get(RANK_COL)}
             if len(rows) < 1000:
                 break
             last = rows[-1]["ean"]
@@ -1054,7 +1173,7 @@ def fetch_existing_index() -> dict[tuple[str, str], dict]:
 def upsert_index(rows: list[dict]):
     cols = ["market", "ean", "slug", "title", "brand", "category", "rayon", "image_url", "offers_count", "merchants_count",
             "min_price", "max_price", "old_price", "refurbished_min_price", "best_merchant", "deal_ok", "updated_at",
-            "prev_price", "price_changed_at", "drop_pct", "lowest_since"]
+            "prev_price", "price_changed_at", "drop_pct", "lowest_since", RANK_COL]
     # Un envoi à la fois : en parallèle, les écritures ont saturé la base gratuite (incident du 15/11).
     # Lots de 200 et nouvelles tentatives : chaque ligne met à jour les index de recherche (fastupdate = off),
     # un lot de 500 a dépassé le délai de la passerelle (504) pendant la reconstruction du 16/11.
