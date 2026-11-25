@@ -95,6 +95,9 @@ INDEXNOW_KEY = "e2f569046b3da5ad02dbfbd17528d111"  # public : servi à {SITE}/{c
 INDEXNOW_MARKETS = ("fr", "uk", "de", "us", "it", "es")    # marchés indexés (src/lib/markets.ts, SITES indexable)
 BATCH = 500
 REMOVAL_GUARD = 0.5  # flux < 50 % des offres actives → suspect, pas de retrait
+# Flux dont les prix sont hors TVA (25/11 : PCHUB.UK, 389 produits comparés sur 400 entre 15 et 25 % sous les autres
+# boutiques, 44 % pile à 20 %) : prix et prix barré remis TTC.
+EX_VAT = {"pchub-uk": Decimal("1.2")}
 MAX_OLD_PRICE_RATIO = 4  # prix barré > 4 × prix : erreur de flux (ex. 100 000 € → 49,99 €)
 # Produits reconditionnés vendus dans les flux « neuf » (le prix barré y est le prix du neuf).
 REFURBISHED_NAME = re.compile(r"reconditionn|refurbish|\boccasion\b|seconde vie", re.IGNORECASE)
@@ -192,7 +195,8 @@ ADULT_NAME = re.compile(
     r"\b(sex[ -]?toys?|sextoys?|sex ?shop|jouets? (sexuels?|erotiques?)|vibromasseurs?|vibratori|vibradores?"
     r"|(?<!concrete )(?<!poker )(?<!beton )vibrators?(?! motor)|vibrating (cock )?(rings?|pant(y|ies)|eggs?|bullets?|plugs?|lip balm|mascara)"
     r"|dildos?|godes?|godemiches?|butt[ -]?plugs?|anal[ -](plugs?|beads?|sprays?|lubes?|lubricants?|toys?|serums?|creams?|douches?)"
-    r"|plugs? anal(es)?|penis(es)?|peniens?|penienne?s?|cock[ -]?rings?|ball stretchers?|masturbat\w*|(egg|super|penis) strokers?"
+    r"|plugs? anal(es)?|penis(es)?|peniens?|penienne?s?|cock[ -]?rings?|ball stretchers?|masturb\w*|(egg|super|penis) strokers?"
+    r"|vibratore|vibratrice|sex machines?|macchina del sesso|love botz|vibe republic"
     r"|fleshlight|strap[ -]?ons?|bondage|bdsm|fetish\w*|erotic|erotique|erotisch\w*|erotici|eroticos?|kamasutra|clitor\w*"
     r"|g[ -]?spot|point g|boules? de geisha|love (eggs?|balls?)|nipple clamps?|fisting|delay (gels?|sprays?|creams?)|sex ?dolls?"
     r"|poupees? (gonflables?|sexuelles?)|gliding cream|toy cleaner"
@@ -226,6 +230,9 @@ def row_to_offer(row: dict, feed: Feed) -> dict | None:
     price = parse_price(row.get("search_price"))
     if price and price >= PRICE_MAX:
         return None
+    vat = EX_VAT.get(feed.merchant_key)
+    if price and vat:
+        price = (price * vat).quantize(Decimal("0.01"))
     name = unescape_text((row.get("product_name") or "").strip())
     if NOT_A_PRODUCT.search(name) or is_adult(name, category, row.get("brand_name")):
         return None
@@ -244,7 +251,8 @@ def row_to_offer(row: dict, feed: Feed) -> dict | None:
         "name": name[:300],
         "brand": unescape_text((row.get("brand_name") or "").strip()) or None,
         "price": price,
-        "old_price": plausible_old_price(parse_price(row.get("product_price_old")), price),
+        "old_price": plausible_old_price((o * vat).quantize(Decimal("0.01")) if vat and (o := parse_price(row.get("product_price_old"))) else
+                                         parse_price(row.get("product_price_old")), price),
         "currency": (row.get("currency") or feed.currency).strip() or feed.currency,
         "in_stock": (row.get("in_stock") or "1").strip().lower() in ("1", "true", "yes", "y"),
         "condition": "refurbished" if REFURBISHED_NAME.search(name) else feed.condition,

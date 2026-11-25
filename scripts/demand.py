@@ -40,8 +40,8 @@ WINDOW_DAYS = 28
 HALF_LIFE_DAYS = 7
 SIGNAL_WEIGHT = {"search": 3.0, "rayon_view": 1.5, "product_view": 1.0, "outbound": 4.0, "sale": 15.0,
                  "ai_read": 1.5, "gsc_click": 2.0, "gsc_impression": 0.1, "gsc_query": 0.1}
-K_RAYON, K_SOUS, K_BRAND = 40.0, 20.0, 20.0           # force du lissage (en « signaux équivalents » ; un visiteur en émet plusieurs)
-CLIP_RAYON, CLIP_SOUS, CLIP_BRAND = (0.4, 3.0), (0.5, 2.0), (0.6, 3.0)
+K_RAYON, K_SOUS, K_BRAND = 40.0, 20.0, 40.0           # force du lissage (en « signaux équivalents » ; un visiteur en émet plusieurs)
+CLIP_RAYON, CLIP_SOUS, CLIP_BRAND = (0.4, 3.0), (0.5, 2.0), (0.7, 2.0)
 MIN_EVENTS_MARKET = 30                                 # en dessous, audience par marché fixe (MARKET_WEIGHT)
 VIEW_MARKET = {"fr": "fr", "en": "fr", "uk": "uk", "us": "us", "de": "de", "it": "it", "es": "es"}
 # Noms de gamme → marque (recherches « macbook », « galaxy s24 », « ps5 »…)

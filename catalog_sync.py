@@ -68,7 +68,47 @@ VALUE_PRICE_CAP = 3000            # au-delà, le prix n'augmente plus la valeur 
 # Ordre d'affichage (rang mix) : prix moins déterminant (plafond 1 500 €, puissance 0,5) et produits vendus par
 # plusieurs boutiques devant (+30 % par boutique) : le 25/11, avec le score de sélection, l'iPhone 18 Pro 2 To à
 # 3 129 € passait avant l'iPhone 17 que les gens cherchent.
-DISPLAY_PRICE_CAP = 1500
+DISPLAY_PRICE_CAP = 1200
+# Variété de l'ordre d'affichage (25/11, retours d'utilisateurs simulés : 48 Apple sur 48 en tête des ordinateurs,
+# 20 Samsung d'affilée, que des aspirateurs) : dans un rayon, chaque produit de plus d'une même marque, d'un même modèle
+# (couleurs) ou d'un même sous-rayon vaut un peu moins pour l'ordre.
+BRAND_DECAY, FAMILY_DECAY, SOUS_DECAY, SHOP_DECAY = 0.93, 0.5, 0.985, 0.96
+ACCESSORY_FACTOR = 0.3            # coque, câble, chargeur… derrière les appareils (sauf recherche d'un accessoire)
+FOREIGN_SHOP_FACTOR = 0.5         # produit vendu seulement par une boutique d'un autre pays (titre dans sa langue)
+# Mots d'accessoire (même liste que la fonction SQL search_is_accessory, sans manettes : produit principal du gaming).
+_ACCESSORY = re.compile(r"\b(coques?|housses?|etuis?|sacoches?|sacs?|backpacks?|rucksacks?|sac a dos|spares?|spare parts?|"
+    r"ersatzteile?|ricambi|repuestos?|nettoyants?|cleaners?|magnets?|aimants?|pochettes?|protections?|protege|films?|"
+    r"verre trempe|chargeurs?|cables?|cordons?|adaptateurs?|filtres?|supports?|socles?|station d accueil|hubs?|docks?|"
+    r"skins?|stickers?|autocollants?|antivols?|brosses?|boitiers?|cases?|covers?|sleeves?|bags?|protectors?|"
+    r"tempered glass|chargers?|adapters?|adaptors?|locks?|filters?|stands?|mounts?|holders?|straps?|grips?|decals?|"
+    r"enclosures?|replacement|keycaps?|hulle|tasche|schutzfolie|panzerglas|ladegerat|ladekabel|kabel|halterung|"
+    r"gehause|custodia|pellicola|caricatore|cavo|adattatore|supporto|funda|carcasa|protector|cargador|adaptador|soporte|"
+    r"brackets?|piles?|batteries?|knopfzelle|akku|batterie)\b")
+_ACCESSORY_CAT = re.compile(r"\b(accessoires?|accessories|accessory|zubehor|accessori|accesorios)\b")
+
+
+def is_accessory(title: str | None, category: str | None) -> bool:
+    """Accessoire d'après les 6 premiers mots du titre ou le dernier niveau de la catégorie de la boutique."""
+    head = " ".join(brand_key(title).split()[:6])
+    cat = brand_key(re.sub(r"^.*[/>|]", "", category or ""))
+    return bool(_ACCESSORY.search(head) or _ACCESSORY.search(cat) or _ACCESSORY_CAT.search(cat))
+
+
+def diversify(scores: dict, keys: dict) -> dict:
+    """Score d'affichage avec variété : keys[(m, k)] = (rayon, marque, modèle, sous-rayon, boutique). Dans chaque rayon,
+    le i-ème produit d'une même marque (classés par score) est multiplié par BRAND_DECAY**i, d'un même modèle par
+    FAMILY_DECAY**i, d'un même sous-rayon par SOUS_DECAY**i, d'une même boutique par SHOP_DECAY**i."""
+    out = dict(scores)
+    for idx, decay in ((1, BRAND_DECAY), (2, FAMILY_DECAY), (3, SOUS_DECAY), (4, SHOP_DECAY)):
+        groups = defaultdict(list)
+        for mk, kv in keys.items():
+            if kv[idx]:
+                groups[(mk[0], kv[0], kv[idx])].append(mk)
+        for g in groups.values():
+            g.sort(key=lambda mk: -scores[mk])
+            for i, mk in enumerate(g):
+                out[mk] *= decay ** i
+    return out
 # Demande par rayon : recherches et clics observés sur le site (high-tech surtout, 24/11) et prix moyen du rayon.
 RAYON_DEMAND = {
     **dict.fromkeys(("smartphones", "ordinateurs", "tv-video", "audio", "ecrans", "photo", "gaming", "objets-connectes",
@@ -347,7 +387,7 @@ def product_value(row: dict, pct: float | None, rayon: str | None, eur: float = 
     rayon, du sous-rayon et de la marque, × fiabilité du marchand, × audience du marché (demand : mesurés chaque nuit
     par scripts/demand.py ; sans mesure, poids de départ RAYON_DEMAND et MARKET_WEIGHT), ÷ 5 sans photo, × 1,3 en bon
     plan ou en baisse, + 15 % par boutique de plus qui le vend (jusqu'à 4 : c'est une vraie comparaison).
-    display : variante pour l'ordre d'affichage (DISPLAY_PRICE_CAP, puissance 0,5, + 30 % par boutique)."""
+    display : variante pour l'ordre d'affichage (DISPLAY_PRICE_CAP, puissance 0,3, + 30 % par boutique, marque ×1,6 au plus)."""
     d = demand or {}
     price = min((row.get("min_price") or 0) * eur, DISPLAY_PRICE_CAP if display else VALUE_PRICE_CAP)
     r = rayon or "autres"
@@ -356,7 +396,10 @@ def product_value(row: dict, pct: float | None, rayon: str | None, eur: float = 
         * d.get("sous", {}).get(market, {}).get(f"{r}/{sous}", 1.0) \
         * d.get("brand", {}).get(market, {}).get(brand_key(row.get("brand")), 1.0) \
         * d.get("merchant", {}).get(str(mid), 1.0)
-    v = (price / VAT * (pct if pct is not None else DEFAULT_PCT) / 100) ** (0.5 if display else 0.7) * w
+    if display:                       # marque : effet limité dans l'ordre (quelques recherches suffisaient à tout teinter)
+        w = w / d.get("brand", {}).get(market, {}).get(brand_key(row.get("brand")), 1.0) \
+            * min(1.6, d.get("brand", {}).get(market, {}).get(brand_key(row.get("brand")), 1.0))
+    v = (price / VAT * (pct if pct is not None else DEFAULT_PCT) / 100) ** (0.3 if display else 0.7) * w
     if not row.get("image_url"):
         v /= 5
     if row.get("deal_ok") or row.get("drop_pct"):
@@ -896,7 +939,7 @@ def main():
     rates_by_rayon, rates_default = load_rates()
     demand = load_demand()
     eur = {m: 1 / (fx.get(MARKET_CURRENCY[m]) or 1) for m in products} if (fx := ecb_rates()) else {m: 1.0 for m in products}
-    value, rank_value, rayon_of, mid_of = {}, {}, {}, {}
+    value, rank_value, rayon_of, mid_of, div_keys = {}, {}, {}, {}, {}
     for m, prods in products.items():
         for k, p in prods.items():
             best = next((o for o in offers_by_key[(m, k)] if o["n"] == p["row"]["best_merchant"]), None)
@@ -906,7 +949,13 @@ def main():
             args_v = (p["row"], rates_by_rayon.get((mid, rayon), rates_default.get(mid)), rayon, eur[m], m,
                       demand, prev.get("sous") if prev else None, mid)
             value[(m, k)] = product_value(*args_v)
-            rank_value[(m, k)] = product_value(*args_v, display=True)
+            r = p["row"]
+            rank_value[(m, k)] = product_value(*args_v, display=True) \
+                * (ACCESSORY_FACTOR if is_accessory(r.get("title"), r.get("category")) else 1.0) \
+                * (FOREIGN_SHOP_FACTOR if best and best.get("ext") else 1.0)
+            div_keys[(m, k)] = (rayon, brand_key(r.get("brand")), variant_key(r.get("title")), prev.get("sous") if prev else None,
+                                r.get("best_merchant"))
+    rank_value = diversify(rank_value, div_keys)
     kept, extra = select_catalog(products, owner, existing, value=value)
     dropped = [(m, k) for m, prods in products.items() for k in prods if (m, k) not in kept]
     n_old = sum(1 for mk in dropped if mk in existing)
