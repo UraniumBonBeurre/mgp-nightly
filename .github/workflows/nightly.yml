@@ -71,6 +71,11 @@ jobs:
         id: demand
         if: ${{ always() && !inputs.check }}
         run: python3 scripts/demand.py > out.log 2>&1 || { tail -n 40 out.log; exit 1; }
+        env:                                  # demand.py importe catalog_sync, qui prépare son accès R2 au chargement
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
 
       - name: Sync catalogue (all partner feeds)
         id: catalog
