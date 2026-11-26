@@ -32,15 +32,16 @@ def sb(method: str, path: str, body=None):
                                  headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
                                           "Content-Type": "application/json",
                                           "Prefer": "resolution=merge-duplicates,return=minimal"})
-    for attempt in range(4):                     # 19/11 : erreur 500 passagère juste après le classement (base chargée)
+    # 19/11 et 26/11 : erreur 500 passagère en fin de relevé (base encore chargée) : jusqu'à ~7 min de patience
+    for attempt in range(6):
         try:
             with urllib.request.urlopen(req, timeout=120) as r:
                 r.read()
             return
         except urllib.error.HTTPError as e:
-            if e.code < 500 or attempt == 3:
+            if e.code < 500 or attempt == 5:
                 raise
-            time.sleep(15 * (attempt + 1))
+            time.sleep(30 * (attempt + 1))
 
 
 def fetch_all() -> list[dict]:
